@@ -1,0 +1,12 @@
+-- [PROPUESTA] Placeholder — no migration runner executes this file yet.
+--
+-- Fase 1 only establishes the folder layout from PROMPT_MASTER_CLAUDE_CODE.md
+-- §7/§8 and decides the SQLite driver in docs/adr/0002-sqlite-driver.md.
+-- The real schema (schema_migrations, config_versions, strategies,
+-- market_bars, datasets, cycles, feature_snapshots, regimes, decisions,
+-- llm_advisories, risk_mirror_checks, order_intents, order_events, fills,
+-- managed_positions, trades, equity_snapshots, reconciliations,
+-- kill_switch_events, backtest_runs, backtest_trades, stage_promotions,
+-- alerts, heartbeats) is written once src/db/ is implemented in a later
+-- Fase, per the ADR's chosen driver and WAL/busy_timeout/foreign_keys
+-- pragmas from PROMPT_MASTER_CLAUDE_CODE.md §8.

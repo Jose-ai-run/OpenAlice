@@ -1,0 +1,7 @@
+# [PROPUESTA] Placeholder — no loader reads this file yet.
+#
+# Fase 1 only establishes the folder layout from PROMPT_MASTER_CLAUDE_CODE.md
+# §7/§10 and the ADRs in docs/adr/. The per-strategy id/version/enabled/
+# mode_cap/universe/interval/params/allocation/regimes_allowed schema
+# belongs to Fase 3 (Strategy SDK) once src/strategies/ is implemented —
+# see src/strategies/.gitkeep.

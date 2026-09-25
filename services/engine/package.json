@@ -1,0 +1,29 @@
+{
+  "name": "@traderalice/engine-service",
+  "version": "0.1.0",
+  "description": "Deterministic strategy/risk-mirror/execution engine — skeleton only, no business logic yet (Fase 1)",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsx watch src/main.ts",
+    "start": "node dist/engine.cjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --root ../.. --config vitest.config.ts --project node services/engine/src"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.0.12",
+    "hono": "^4.12.32"
+  },
+  "devDependencies": {
+    "@types/node": "^25.2.3",
+    "tsup": "^8.5.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.5"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "license": "AGPL-3.0-only"
+}

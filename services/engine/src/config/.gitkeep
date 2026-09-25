@@ -1,0 +1,6 @@
+# Placeholder — no code here yet.
+#
+# Fase 1+ — Zod config loader for config/engine.yaml y config/strategies.yaml (§10 PROMPT_MASTER). No parsing logic yet.
+#
+# Fase 1 (this commit) only establishes the folder layout from
+# PROMPT_MASTER_CLAUDE_CODE.md §7 plus ADRs; it contains zero business logic.
