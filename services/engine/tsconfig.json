@@ -9,6 +9,9 @@
     "skipLibCheck": true,
     "noEmit": true,
     "resolveJsonModule": true,
+    "paths": {
+      "@/*": ["../../src/*"]
+    },
     "customConditions": ["openalice-source"]
   },
   "include": ["src"],

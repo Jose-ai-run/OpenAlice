@@ -514,9 +514,18 @@ importers:
       '@hono/node-server':
         specifier: ^2.0.12
         version: 2.0.12(hono@4.12.32)
+      '@traderalice/uta-protocol':
+        specifier: workspace:*
+        version: link:../../packages/uta-protocol
+      decimal.js:
+        specifier: ^10.6.0
+        version: 10.6.0
       hono:
         specifier: ^4.12.32
         version: 4.12.32
+      zod:
+        specifier: ^4.3.6
+        version: 4.3.6
     devDependencies:
       '@types/node':
         specifier: ^25.2.3
