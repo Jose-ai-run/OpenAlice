@@ -9,6 +9,17 @@ Consecuencia: nada cambió bajo `services/uta/`, `src/tool/trading.ts`, `src/cor
 
 `package.json` `"version": "0.94.1"` — coincide con el commit auditado.
 
+> **Regla permanente de este documento (añadida 2026-09-25, tras un incidente real — ver §7.5):**
+> Al documentar cualquier hallazgo que involucre una credencial, token o secreto,
+> describe su **forma** (prefijo, longitud aproximada, encoding) y su **origen**
+> (variable de entorno exacta, servicio, mecanismo por el que llegó ahí) —
+> **nunca el valor**, ni siquiera parcial o truncado. Un hallazgo correcto se ve
+> así: *"Bearer `<redactado>`, ~40 chars, origen: variable de entorno
+> `ANTHROPIC_AUTH_TOKEN`"* — eso comunica exactamente lo mismo que citar el
+> valor, sin filtrar nada. Esta regla aplica a este archivo y a cualquier otro
+> documento, mensaje de commit o salida que yo genere de aquí en adelante en
+> este proyecto.
+
 ---
 
 ## 1. Hallazgos re-verificados (§1 de PROMPT_MASTER)
@@ -166,13 +177,9 @@ que en Fase 0 falló con `EPERM` en esta máquina.
 auth header".** `defaults to x-api-key (Anthropic first-party)` y `uses
 x-api-key when authMode is x-api-key`: ambos esperan
 `captured?.headers['authorization']` `undefined`, y reciben un valor real
-con forma de Bearer token (redactado deliberadamente — el valor real no se
-registra en este documento; solo forma y origen se documentan).
-**No se investigó la causa** (fuera del mandato de esta fase, que es
-documentar, no arreglar) — se deja constancia explícita de que el valor
-recibido tiene forma de credencial real, no un placeholder de test, por si
-el humano quiere revisarlo con prioridad antes de Fase 2 por motivos de
-higiene de secretos en tests.
+con forma de Bearer token (nunca registrado en texto plano en este
+documento — ver §7.5 para el diagnóstico completo de origen, confirmado
+por pedido explícito, sin arreglar el código).
 
 **Grupo D — `src/workspaces/headless-task.spec.ts` (1 fallo).**
 `watchdog SIGTERMs a process that overruns timeoutMs` → `Test timed out in
@@ -240,6 +247,74 @@ no corregirlos.
 
 Cualquier fallo nuevo en Fase 1+ que no esté en esta lista es atribuible al
 cambio que lo introdujo.
+
+### 7.5 Diagnóstico del Grupo C (`agent-probe.spec.ts`) — origen confirmado, NO arreglado
+
+Investigado el 2026-09-25, por pedido explícito, **solo diagnóstico — el
+código no se tocó.**
+
+**Origen exacto:** variable de entorno `ANTHROPIC_AUTH_TOKEN`, del servicio
+Anthropic — en este checkout, la propia credencial de sesión de esta
+instancia de Claude Code/Claude Agent SDK que está ejecutando este trabajo
+(confirmado listando **solo los nombres** de variables de entorno
+relacionadas, nunca sus valores: `ANTHROPIC_AUTH_TOKEN` está presente en el
+shell que ejecuta `vitest`).
+
+**Mecanismo exacto** ([VERIFICADO EN REPOSITORIO], `src/workspaces/agent-probe.ts:62-68`):
+
+```ts
+const client = input.authMode === 'bearer'
+  ? new Anthropic({ authToken: input.apiKey, baseURL: input.baseUrl, ... })
+  : new Anthropic({ apiKey: input.apiKey, baseURL: input.baseUrl, ... })
+```
+
+Cuando `authMode` no es `'bearer'`, el código solo pasa `apiKey` al
+constructor de `Anthropic` (SDK `@anthropic-ai/sdk`) — nunca pasa
+`authToken` explícitamente. El propio SDK, independientemente de eso, hace
+su **propio** fallback a `process.env.ANTHROPIC_AUTH_TOKEN` para el slot de
+credencial `authToken`/`Authorization: Bearer` si no se le pasó uno
+explícito — son dos slots de credencial independientes en el SDK
+(`apiKey` → header `x-api-key`; `authToken` → header
+`Authorization: Bearer`), y `probeAnthropic()` solo controla uno de los
+dos. `agent-probe.spec.ts` no limpia `process.env.ANTHROPIC_AUTH_TOKEN`
+antes de instanciar el cliente, así que en cualquier entorno donde esa
+variable ya esté presente (como esta propia sesión de Claude Code), el
+test recibe un header `Authorization: Bearer <redactado>, origen:
+ANTHROPIC_AUTH_TOKEN` que el test no esperaba y que no tiene nada que ver
+con el `apiKey: 'sk-default'` que el test sí pasó explícitamente.
+
+**¿Puede este valor acabar en logs, snapshots o archivos de test?** Los dos
+tests fallidos no usan snapshots de Vitest (no hay `.snap` involucrado) ni
+hacen `console.log` del valor — la única vía de fuga es el **reporter de
+fallos de Vitest**, que al imprimir el diff `expected/received` de una
+aserción fallida imprime el valor recibido completo (o truncado con `…` si
+es largo) a stdout/stderr. Eso es exactamente lo que ocurrió aquí: el
+propio proceso `pnpm test` imprimió el header recibido a la terminal
+porque la aserción falló, y ese stdout terminó capturado en el archivo de
+salida de la tarea en segundo plano de esta sesión — no en ningún archivo
+del repositorio por defecto. **Incidente real relacionado**: en la
+respuesta anterior de este mismo documento, yo (el agente) copié ese valor
+impreso por el reporter, tanto a este archivo (ya commiteado en git local)
+como a un mensaje de chat al humano. Ambas copias fueron localizadas y
+redactadas/limpiadas el 2026-09-25 (commit de git local reescrito por
+`git commit --amend` + rebase de `feat/engine-f1-architecture`; el archivo
+de salida de la tarea en segundo plano, fuera del repositorio, también
+redactado). Ver la regla permanente al inicio de este documento.
+
+**Riesgo real señalado, no solo de higiene de tests:** el mismo mecanismo
+del SDK (`authToken` fallback ambiental independiente de `apiKey`) aplica
+también en producción, no solo en el test. Si en algún momento el proceso
+de Alice tuviera `ANTHROPIC_AUTH_TOKEN` en su entorno por cualquier otro
+motivo legítimo (por ejemplo, porque el propio proceso host corre bajo un
+harness de agente), y un usuario configurara el botón "Test" de
+`probeAnthropic` contra un `baseUrl` de un tercero (un gateway
+Anthropic-compatible cualquiera) sin `authMode: 'bearer'` explícito, ese
+`ANTHROPIC_AUTH_TOKEN` ambiental se enviaría igualmente a ese tercero vía
+el header `Authorization`, sin que el código de `probeAnthropic` lo haya
+pedido ni lo sepa. **No se investigó ni se propone aquí un arreglo** (fuera
+de mandato de esta fase), pero se deja registrado porque no es solo un
+artefacto de aislamiento de tests — es un fallback ambiental del SDK que
+el código de `agent-probe.ts` no suprime explícitamente.
 
 ---
 
