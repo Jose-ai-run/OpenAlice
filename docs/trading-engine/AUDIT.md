@@ -237,6 +237,27 @@ No se ejecutó ningún arreglo (por ejemplo, `pnpm -F @traderalice/connector-pro
 porque el mandato de esta línea base es documentar fallos preexistentes,
 no corregirlos.
 
+**Nota de entorno (verificada el 2026-09-25, por pedido explícito — esto
+sí se ejecutó como diagnóstico, a diferencia del resto de esta sección):**
+
+```bash
+corepack pnpm -F @traderalice/connector-protocol build
+cd ui && npx tsc -b
+```
+
+Resultado real: el primer comando compila el paquete (`tsc`, vía el script
+`build` de `packages/connector-protocol/package.json`) y genera
+`packages/connector-protocol/dist/` (antes ausente). El segundo comando,
+re-ejecutado después, **pasa limpio, sin ningún error** — confirma que la
+única causa raíz de los 23 errores era el paquete sin compilar, no un
+problema de tipos real en el código de `ui/`. `dist/` está en
+`.gitignore` (raíz, línea 2), así que este build no deja cambios
+trackeados en git — es un paso de entorno que cualquiera que trabaje en
+`ui/` necesita ejecutar (o automatizar) antes de tipar, no un fix de
+código. No se investigó si `pnpm install`/`pnpm build` de la raíz ya
+debería encadenar este build de paquete automáticamente y no lo está
+haciendo (posible mejora de DX, fuera del alcance de este diagnóstico).
+
 ### 7.4 Resumen de la línea base
 
 | Comando | Resultado | Fallos |
