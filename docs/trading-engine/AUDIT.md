@@ -107,6 +107,142 @@ Ninguna. El HEAD actual es idéntico al commit auditado (`0d4faa90b90...` → di
 
 ---
 
+## 7. Línea base completa (previa a Fase 1)
+
+Ejecutado el 2026-09-24/25, sobre el mismo HEAD que el resto de esta Fase 0
+(`0d4faa90...`, 0 commits de diferencia). Comandos y salida real, sin
+resumir ningún fallo como éxito. **Nada de esto se arregló** — es la línea
+base contra la que cualquier fallo futuro será atribuible.
+
+### 7.1 `pnpm test` (suite hermética completa)
+
+**FALLÓ.** No estaba en verde antes de tocar nada:
+
+```
+Test Files  12 failed | 836 passed | 6 skipped (854)
+     Tests  17 failed | 7192 passed | 125 skipped (7334)
+  Duration  985.98s
+```
+
+Los 17 fallos, agrupados por causa raíz común (no arreglados, solo
+diagnosticados por lectura del mensaje de error):
+
+**Grupo A — `EPERM: operation not permitted, symlink ...` (11 fallos).**
+Node no puede crear symlinks en este Windows sin privilegios elevados
+(cuenta administradora, o "Modo desarrollador" activado en Configuración de
+Windows) — comportamiento nativo del SO, no del código. Afecta,
+exactamente:
+- `src/core/inbox-files.spec.ts` > `resolves source files, rejecting missing paths, directories and escaping symlinks`
+- `src/workspaces/sticker-packs.spec.ts` > `rejects stale previews, symlinks, traversal filenames and invalid images`
+- `src/workspaces/template-upgrade.spec.ts` > `requires manual repair of a linked Skill file before removal or restore`
+- `src/workspaces/template-upgrade.spec.ts` > `reports unsafe parent directories as unverified instead of absent copies`
+- `src/server/workspace-files.spec.ts` > `serves exact binary bytes and refuses missing, escaping, symlink and oversized files`
+- `packages/cli/src/lifecycle.spec.mjs` > `reports a direct activation against an older live Runtime and confirms matching up readiness`
+- `packages/cli/src/lifecycle.spec.mjs` > `does not let a still-running previous CLI confirm the new direct activation`
+- `packages/cli/src/lifecycle.spec.mjs` > `does not race a live installer while handling readiness failure`
+- `packages/cli/src/uninstall.spec.mjs` > `preserves a symlinked profile while removing its matching block`
+- `src/webui/routes/inbox.spec.ts` > `resolves inline files in the publisher Workspace and serves only the stored reference index`
+- `src/webui/routes/workspace-content.spec.ts` > `resolves metadata and bytes but rejects traversal, absent files and escaping symlinks`
+
+Nota de riesgo (no un arreglo, una observación): varios de estos specs
+prueban exactamente el control de seguridad "rechaza symlinks que escapan
+del directorio permitido" (path-traversal). En este entorno Windows sin
+privilegios de symlink, esa cobertura de seguridad **no se pudo ejecutar
+en absoluto** — ni pasó ni falló por una razón de producto, simplemente no
+corrió su aserción real. Es una particularidad de Windows, no un hallazgo
+sobre el motor de trading, pero se documenta aquí por transparencia.
+
+**Grupo B — `scripts/pnpm-command.spec.ts` (2 fallos), "on Windows".**
+`runPnpmSync on Windows > runs a quoted pnpm command through the installed
+Corepack shim` y `> preserves a leading config flag, spaces, and cmd
+metacharacters`: ambos esperan `result.status === 0` y reciben `1`.
+Consistente con la particularidad de Windows ya documentada en §4.1: en
+esta máquina `pnpm` no está instalado como shim global de Corepack en la
+ubicación que el test asume — solo funciona vía `corepack pnpm <args>`.
+Estos tests asumen un `pnpm` ya activado globalmente vía `corepack enable`,
+que en Fase 0 falló con `EPERM` en esta máquina.
+
+**Grupo C — `src/workspaces/agent-probe.spec.ts` (2 fallos), "probeAnthropic
+auth header".** `defaults to x-api-key (Anthropic first-party)` y `uses
+x-api-key when authMode is x-api-key`: ambos esperan
+`captured?.headers['authorization']` `undefined`, y reciben un valor real
+con forma de Bearer token (redactado deliberadamente — el valor real no se
+registra en este documento; solo forma y origen se documentan).
+**No se investigó la causa** (fuera del mandato de esta fase, que es
+documentar, no arreglar) — se deja constancia explícita de que el valor
+recibido tiene forma de credencial real, no un placeholder de test, por si
+el humano quiere revisarlo con prioridad antes de Fase 2 por motivos de
+higiene de secretos en tests.
+
+**Grupo D — `src/workspaces/headless-task.spec.ts` (1 fallo).**
+`watchdog SIGTERMs a process that overruns timeoutMs` → `Test timed out in
+5000ms`. Consistente con una diferencia conocida de Windows: Node emula
+`SIGTERM` sobre procesos hijos en Windows en vez de usar la señal POSIX
+real, con temporización menos predecible que en Linux/macOS.
+
+**Grupo E — `src/webui/routes/workspaces.spec.ts` (1 fallo).**
+`native provider model directory > discovers through any adapter in the
+selected Workspace and returns model capabilities together`: el mock
+esperaba ser llamado con `'/w'` y fue llamado con `'C:\\w'` — diferencia de
+formato de ruta específica de Windows (separador y prefijo de unidad) en
+algún punto de la cadena de resolución de rutas del test.
+
+### 7.2 `npx tsc --noEmit` (raíz, cubre `src/`)
+
+**PASÓ, sin errores.** Salida real: ninguna línea de error de TypeScript
+(solo una advertencia no relacionada de npm sobre una config
+desconocida `enable-pre-post-scripts`, irrelevante).
+
+### 7.3 `cd ui && npx tsc -b`
+
+**FALLÓ.** 23 errores `error TS`, en 15 archivos distintos, todos con la
+misma causa raíz:
+
+```
+Cannot find module '@traderalice/connector-protocol' or its corresponding type declarations.
+```
+
+Investigación (lectura, no arreglo): `packages/connector-protocol/package.json`
+declara `"exports": { "types": "./dist/index.d.ts" }`, pero
+`packages/connector-protocol/dist/` **no existe** — el paquete nunca se
+compiló con `tsup`/`tsc` en este checkout. `tsc -b` (modo de referencias de
+proyecto) respeta ese `exports` y por tanto no encuentra los tipos.
+`pnpm test` (vitest), en cambio, no falla por esto porque `vitest.config.ts`
+alía `@traderalice/connector-protocol` directamente a su código fuente
+(`./packages/connector-protocol/src/index.ts`, `vitest.config.ts` líneas
+~22-27, [VERIFICADO EN REPOSITORIO]) y nunca consulta el `exports` del
+`package.json` — por eso el mismo problema no aparece en ningún resultado
+de `pnpm test` ni de `pnpm test:owner:uta`/`test:integration:uta` de §3.
+
+Archivos afectados (15, con 23 errores entre `TS2307` por el módulo
+faltante y `TS7006` en cascada por parámetros que pierden su tipo cuando
+el import falla):
+`src/components/InboxSidebar.spec.tsx`, `src/components/InboxSidebar.tsx`,
+`src/components/MarkdownContent.tsx`, `src/components/market/KlinePanel.tsx`,
+`src/components/workspace/WebSessionView.tsx`, `src/demo/handlers/inbox.ts`,
+`src/hooks/useConversationFiles.ts`, `src/hooks/useInboxContent.ts`,
+`src/lib/inbox-presentation.ts`, `src/live/harness-workbench.ts`,
+`src/office/OfficeInboxDutyDossier.tsx`, `src/office/OfficeInboxDutyReturnBar.tsx`,
+`src/office/duty-registry.spec.ts`, `src/office/duty-registry.ts`,
+`src/pages/InboxPage.spec.tsx`.
+
+No se ejecutó ningún arreglo (por ejemplo, `pnpm -F @traderalice/connector-protocol build`)
+porque el mandato de esta línea base es documentar fallos preexistentes,
+no corregirlos.
+
+### 7.4 Resumen de la línea base
+
+| Comando | Resultado | Fallos |
+|---|---|---|
+| `pnpm test` | **FALLÓ** | 17/7334 tests, 12/854 archivos — todos preexistentes, agrupados en 5 causas (Grupos A-E arriba) |
+| `npx tsc --noEmit` (raíz) | **PASÓ** | 0 |
+| `cd ui && npx tsc -b` | **FALLÓ** | 23 errores en 15 archivos, una sola causa raíz (`packages/connector-protocol` nunca compilado) |
+
+Cualquier fallo nuevo en Fase 1+ que no esté en esta lista es atribuible al
+cambio que lo introdujo.
+
+---
+
 ## Resumen de la línea de tiempo de esta sesión
 
 - Herramientas verificadas: git 2.49.0, Node v24.12.0, pnpm 11.7.0 (vía `corepack pnpm`).
@@ -114,3 +250,4 @@ Ninguna. El HEAD actual es idéntico al commit auditado (`0d4faa90b90...` → di
 - Documentos de referencia copiados sin modificar a `docs/trading-engine/`.
 - Los 10 hallazgos de PROMPT_MASTER §1 y las 6 discrepancias D1–D6 del documento de referencia: **todos CONFIRMADOS**, con archivo:línea de este commit.
 - `pnpm install`, `pnpm test:owner:uta` (58/58 archivos, 1055/1055 tests) y `pnpm test:integration:uta` (1/1 archivo, 15/15 tests): **todos en verde**, sin carriles live-paper ni contacto con brokers.
+- Línea base completa (§7, previa a Fase 1): `pnpm test` **FALLÓ** (17/7334 tests, 12/854 archivos — ver Grupos A-E en §7.1, todos preexistentes y sin arreglar); `npx tsc --noEmit` en la raíz **PASÓ** limpio; `cd ui && npx tsc -b` **FALLÓ** (23 errores, una sola causa raíz: `packages/connector-protocol` nunca se compiló, `dist/` no existe).
