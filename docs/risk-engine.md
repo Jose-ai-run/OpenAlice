@@ -1,0 +1,184 @@
+# Risk Engine
+
+This guide owns the deterministic risk gate inside UTA — the R0–R20 rule
+chain, the persistent kill switch, and the deployment-safety contract that
+keeps a configured policy from silently going unenforced.
+
+Related guides: [[docs/project-structure.md]] (UTA's role as the sole
+trading-write chokepoint) and [[docs/uta-live-testing.md]] (live/paper
+acceptance for anything that reaches a real broker — the RiskEngine
+itself is never exercised against a real broker; it only sits in front of
+one).
+
+## Status
+
+**[PROPUESTA] — implemented behind a flag, not yet the default.** This
+guide documents the design and the current implementation as of Fase 4a
+of the trading-engine work (`docs/adr/`, `docs/trading-engine/`). Fase 4b
+adds UTA-side token/scope authentication; neither replaces the other.
+
+## What it is
+
+Every `placeOrder`/`modifyOrder` write UTA's `UnifiedTradingAccount`
+dispatches passes through `RiskEngine.check` as the **first** step, before
+the pre-existing guards (`services/uta/src/domain/trading/guards/`).
+`closePosition` and `cancelOrder` are always allowed — the RiskEngine
+never sees them, by design: reducing or cancelling exposure is never the
+thing a risk gate should block.
+
+```text
+UnifiedTradingAccount dispatcher
+  -> wrapDispatcherWithRiskEngine (services/uta/src/domain/trading/risk/risk-dispatcher.ts)
+       -> evaluateRisk() [placeOrder/modifyOrder only]
+            -> R0..R20 rule chain, first rejection wins
+       -> pre-existing guard pipeline (max-position-size, cooldown, symbol-whitelist)
+       -> the broker
+```
+
+Source: `services/uta/src/domain/trading/risk/`.
+
+## The flag
+
+`OPENALICE_RISK_ENGINE_ENABLED=1` turns the RiskEngine on. **Unset (or
+any value other than `"1"`), UTA's dispatcher is byte-identical to before
+the RiskEngine existed** — `wrapDispatcherWithRiskEngine` returns the
+exact same dispatcher function reference, untouched. This is verified
+directly: `pnpm test:owner:uta` and `pnpm test:integration:uta` produce
+the identical pass counts with the flag unset as they did before the
+RiskEngine was added (`docs/trading-engine/AUDIT.md` §9.4).
+
+## Deployment safety — why a configured policy can refuse to start UTA
+
+`OPENALICE_RISK_POLICY_PATH` set with `OPENALICE_RISK_ENGINE_ENABLED`
+unset (or not `"1"`) means an operator configured a policy that is not
+actually being enforced — a silent fail-open dressed up as a governed
+deployment. `services/uta/src/domain/trading/risk/deployment-safety.ts`'s
+`checkRiskEngineDeploymentSafety()` catches this at boot
+(`services/uta/src/main.ts`, before anything else starts) and refuses to
+start with a explicit error instead of quietly running ungoverned.
+
+With the flag unset and no policy path configured (ordinary local
+development), UTA still starts, but logs a visible warning that the
+RiskEngine is disabled.
+
+**Production (Fase 10) requirement: `OPENALICE_RISK_ENGINE_ENABLED=1` is
+mandatory.** How this gets guaranteed operationally (systemd
+`Environment=`, the Docker Compose env block, or a startup assertion in
+the deploy tooling itself) is Fase 10's concern to finalize
+(`deploy/RUNBOOK.md`, not yet written) — this guide records the
+requirement now so Fase 10 does not have to rediscover it.
+
+## The policy file
+
+Read-only, host-owned, never written by any API
+(`services/uta/src/domain/trading/risk/policy.ts`). Default path
+`/etc/openalice/risk-policy.json`; `OPENALICE_RISK_POLICY_PATH` overrides
+it (required for local development off Linux — see ADR-0004). Loading
+never throws: a missing file, invalid JSON, or a schema violation all
+resolve to a rejected verdict with `killSwitch: 'HALT_NEW'` rather than
+crashing the process or silently allowing.
+
+Per-account policy resolves the exact account id, falling back to a
+`"default"` entry; an account with neither fails closed the same way a
+missing file does.
+
+## The R0–R20 rules
+
+One pure function per rule under `risk/rules/`, run in numeric order —
+the first rejection wins. Summary (see each `rN-*.ts` file for the exact
+check):
+
+| Rule | What it checks |
+|---|---|
+| R0 | Kill switch is `NORMAL` |
+| R1 | Action is in the policy's `allowedActions` |
+| R2 | The account resolved a policy at all |
+| R3 | Symbol/secType allowlists |
+| R4 | Trading hours (`'always'` for crypto-style venues, or the broker's market clock) |
+| R5 | Quote freshness |
+| R6 | Limit price within the price band of the live quote |
+| R7 | Order notional cap |
+| R8 | Resulting position notional / % equity |
+| R9 | Resulting gross/net exposure |
+| R10 | Resulting leverage |
+| R11 | Number of open positions (new symbols only) |
+| R12 | Trades per day, total and per symbol |
+| R13 | Per-symbol cooldown (persistent — see M3 below) |
+| R14 | A protective stop is attached or the order is itself a stop type |
+| R15 | Risk per trade as % of equity |
+| R16 | Daily loss limit — **triggers `HALT_NEW`** |
+| R17 | Drawdown from the persistent high-water mark — **triggers `HALT_NEW`** |
+| R18 | `modifyOrder` cannot increase quantity or change the stop price unverified |
+| R19 | Too many consecutive rejects — **triggers `HALT_NEW`** |
+| R20 | Hard capital cap (absolute, not %-of-equity) |
+
+## Persistent state and the kill switch
+
+`risk/risk-state.ts` persists per-account state (`data/trading/<id>/_risk/risk-state.json`)
+atomically (tmp + rename — deliberately not the direct-`writeFile`
+pattern `git-persistence.ts` uses, which Fase 0 flagged as non-atomic).
+Windows can transiently refuse a `rename()` onto an existing destination
+with `EPERM`/`EBUSY` under concurrent writers (a real finding from this
+work, not from the original audit); `saveRiskState` retries a bounded
+number of times before giving up.
+
+The kill switch (`NORMAL | HALT_NEW | FLATTEN`, `risk/kill-switch.ts`)
+survives a UTA restart because it is read from this same file on every
+evaluation, not held in memory — verified directly: two independent
+`evaluateRisk()` calls with no shared object between them still agree on
+`HALT_NEW` after the first one triggers it.
+
+A day-boundary reset clears daily counters (`tradesToday`, per-symbol
+counts, `dailyStartEquity`) but **never** the kill switch itself — only an
+explicit operator reset does that (`resetKillSwitch`), and a same-day
+reset of an R16 (daily-loss) halt requires `force`.
+
+**Fail-closed on state-write failure**: if the atomic write itself fails
+definitively (all retries exhausted), the engine does not continue on the
+in-memory state as if the write had succeeded — it forces the verdict to
+`allowed: false, killSwitch: 'HALT_NEW'` and logs the failure, with a
+best-effort attempt to also persist the halt (which may itself fail if
+the underlying storage is broken — the in-process behavior is what
+matters in that case, not a guaranteed durable record).
+
+## M2 — strict guard resolution
+
+`OPENALICE_RISK_STRICT=1` makes `guards/registry.ts`'s `resolveGuards`
+throw on an unknown guard `type` in `accounts.json`, instead of the
+default silent skip-with-`console.warn` (a Fase 0 finding: a typo
+disables a guard with no visible signal). Unset, behavior is unchanged.
+
+## M3 — cooldown guard, fixed
+
+`guards/cooldown.ts`'s `CooldownGuard`, with the RiskEngine flag on, no
+longer records a cooldown the moment its own `check()` passes (the Fase 0
+defect: it could record a trade that a *later* guard in the pipeline then
+rejected). Instead, `check()` defers entirely to R13 (same persistent
+state), and a new `recordSuccess()` hook — called by `guard-pipeline.ts`
+only after the dispatch actually resolves without throwing — writes the
+cooldown. With the flag off, behavior is unchanged from before Fase 4a,
+defect included.
+
+## Verification
+
+```bash
+cd services/uta && pnpm typecheck && pnpm test
+pnpm test:owner:uta                                        # flag off: identical to the pre-RiskEngine baseline
+pnpm test:integration:uta                                  # same
+OPENALICE_RISK_ENGINE_ENABLED=1 pnpm test:owner:uta        # flag on, no policy configured: fails closed everywhere that writes (expected, not a regression)
+```
+
+The dedicated suite lives under `services/uta/src/domain/trading/risk/*.spec.ts`
+— each test configures its own policy/flag rather than relying on ambient
+environment state, so it passes regardless of the flag's real-world
+default.
+
+## Change Routing
+
+| Change | Owner path |
+|---|---|
+| A new or changed rule (R0–R20) | `services/uta/src/domain/trading/risk/rules/` + `rules.spec.ts` |
+| Policy schema | `risk/policy.ts` + ADR-0004 if the shape changes meaningfully |
+| Kill switch semantics | `risk/kill-switch.ts` + `risk-state.spec.ts` |
+| Deployment-safety gate | `risk/deployment-safety.ts` + this guide's "Deployment safety" section |
+| Auth on top of this (tokens/scopes) | Fase 4b, ADR-0003 — a separate concern from the risk gate itself |

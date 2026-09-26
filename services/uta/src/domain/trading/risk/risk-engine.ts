@@ -153,8 +153,53 @@ export async function evaluateRisk(operation: Operation, deps: RiskEngineDeps): 
   return await finalizeAllowed(accountId, operation, { allowed: true, policyHash, killSwitch: state.killSwitch }, now, state, accountPolicy)
 }
 
+/**
+ * [PROPUESTA] Fail-closed on state-write failure — added 2026-09-26.
+ *
+ * `saveRiskState` already retries transient Windows EPERM/EBUSY (see
+ * risk-state.ts). If it still fails after those retries, something is
+ * fundamentally wrong with the persistence layer — disk full, permissions
+ * changed under us, the volume gone. Continuing to operate on the
+ * in-memory `state` as if the write had succeeded would mean every
+ * counter this function tracks (consecutiveRejects, trades/day, cooldowns,
+ * the kill switch itself) silently stops being durable while the process
+ * keeps approving trades. That is worse than blocking: from here on,
+ * EVERY verdict for this account is forced to `HALT_NEW`, not just this
+ * one operation, and the failure is logged as its own diagnosable case
+ * (`STATE_WRITE_FAILURE`), not left to surface as a generic thrown error.
+ *
+ * Returns `null` on success (caller proceeds with its own verdict), or a
+ * forced verdict to return instead of whatever the rule chain decided.
+ */
+async function persistOrForceHalt(
+  accountId: string, state: RiskState, operation: Operation, now: Date, policyHash: string,
+): Promise<RiskVerdict | null> {
+  try {
+    await saveRiskState(accountId, state)
+    return null
+  } catch (err) {
+    const message = `risk state write failed definitively: ${err instanceof Error ? err.message : String(err)}`
+    console.error(`[uta:risk] ${message} — forcing HALT_NEW for account "${accountId}" (not continuing on in-memory state)`)
+    // Best-effort: the underlying storage may be broken enough that even
+    // this fails — swallow that specific failure, the in-process verdict
+    // below is what actually protects the account either way.
+    await saveRiskState(accountId, {
+      ...state,
+      killSwitch: 'HALT_NEW',
+      killSwitchReason: `STATE_WRITE_FAILURE: ${message}`,
+      killSwitchSetAt: now.toISOString(),
+    }).catch(() => { /* best-effort only — already logged above */ })
+    const verdict: RiskVerdict = { allowed: false, ruleCode: 'STATE_WRITE_FAILURE', reason: message, policyHash, killSwitch: 'HALT_NEW' }
+    await appendRiskDecision(accountId, toLogEntry(accountId, operation, verdict, now)).catch(() => { /* best-effort */ })
+    return verdict
+  }
+}
+
 async function finalize(accountId: string, operation: Operation, verdict: RiskVerdict, now: Date, state: RiskState | undefined): Promise<RiskVerdict> {
-  if (state) await saveRiskState(accountId, state)
+  if (state) {
+    const forced = await persistOrForceHalt(accountId, state, operation, now, verdict.policyHash)
+    if (forced) return forced
+  }
   await appendRiskDecision(accountId, toLogEntry(accountId, operation, verdict, now)).catch(() => { /* logging must never block a verdict */ })
   return verdict
 }
@@ -168,7 +213,8 @@ async function finalizeRejected(
     next = await triggerKillSwitch(accountId, killSwitchTrigger, `${verdict.ruleCode}: ${verdict.reason}`, now)
     verdict = { ...verdict, killSwitch: next.killSwitch }
   } else {
-    await saveRiskState(accountId, next)
+    const forced = await persistOrForceHalt(accountId, next, operation, now, verdict.policyHash)
+    if (forced) return forced
   }
   await appendRiskDecision(accountId, toLogEntry(accountId, operation, verdict, now)).catch(() => {})
   return verdict
@@ -193,7 +239,8 @@ async function finalizeAllowed(
       }
     }
   }
-  await saveRiskState(accountId, next)
+  const forced = await persistOrForceHalt(accountId, next, operation, now, verdict.policyHash)
+  if (forced) return forced
   await appendRiskDecision(accountId, toLogEntry(accountId, operation, verdict, now)).catch(() => {})
   return verdict
 }

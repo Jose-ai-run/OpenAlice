@@ -33,6 +33,7 @@ import { startOrderSyncPoller } from './domain/trading/order-sync-poller.js'
 import { buildKeylessDataUTAs } from './domain/trading/keyless-data-sources.js'
 import { createTradingRoutes } from './http/routes-trading.js'
 import { createSimulatorRoutes } from './http/routes-simulator.js'
+import { checkRiskEngineDeploymentSafety } from './domain/trading/risk/deployment-safety.js'
 import type { UTAEngineContext } from './types.js'
 
 const UTA_PORT = Number(process.env['OPENALICE_UTA_PORT'] ?? 47333)
@@ -41,6 +42,16 @@ const CATALOG_REFRESH_MS = 6 * 60 * 60 * 1000  // 6h
 export async function startUTAService(): Promise<void> {
   const startedAt = new Date().toISOString()
   console.log(`[uta] bootstrap @ ${startedAt}`)
+
+  // [PROPUESTA] Fase 4a deployment-safety gate — before anything else:
+  // a configured risk policy that isn't actually enforced (flag off) is a
+  // silent fail-open, not a disabled feature. See docs/risk-engine.md.
+  const riskSafety = checkRiskEngineDeploymentSafety()
+  if (!riskSafety.ok) {
+    console.error(`[uta] fatal: ${riskSafety.error}`)
+    process.exit(1)
+  }
+  if (riskSafety.warn) console.warn(riskSafety.warn)
 
   // Surface outbound-proxy config at startup so a user behind a proxy can
   // confirm UTA saw it — CCXT exchange instances are bridged onto it per

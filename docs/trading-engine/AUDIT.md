@@ -685,6 +685,100 @@ OPENALICE_RISK_ENGINE_ENABLED=1 pnpm test:owner:uta        # 55/58, 1035/1055 (f
 OPENALICE_RISK_ENGINE_ENABLED=1 pnpm test:integration:uta  # ídem
 ```
 
+### 9.8 Ajuste — evitar fail-open de despliegue (2026-09-26)
+
+**Problema real que esto cierra:** un operador podía configurar
+`OPENALICE_RISK_POLICY_PATH` (creyendo que así "activa" la política) sin
+darse cuenta de que también hacía falta `OPENALICE_RISK_ENGINE_ENABLED=1`
+— UTA arrancaría igual, con una política presente en disco pero
+**nunca evaluada**. Parece gobernado; no lo está.
+
+**Arreglo:** `services/uta/src/domain/trading/risk/deployment-safety.ts`,
+función pura `checkRiskEngineDeploymentSafety(env)`, llamada al inicio de
+`services/uta/src/main.ts` antes de cualquier otra cosa:
+
+- `OPENALICE_RISK_POLICY_PATH` definido + flag apagado → `{ok:false}` →
+  `main.ts` hace `console.error` + `process.exit(1)`. UTA no arranca.
+- Flag apagado sin política definida (desarrollo local normal) →
+  `{ok:true, warn:...}` → UTA arranca, pero con un `console.warn` visible
+  diciendo que el RiskEngine está desactivado.
+- Flag encendido (con o sin política explícita — cae al path por
+  defecto) → `{ok:true}`, sin warning.
+
+**`docs/risk-engine.md`** (nuevo — guía real de owner, no un doc de
+auditoría de esta sesión): documenta el flag, el gate de arranque, la
+tabla completa de R0–R20, el kill switch, M2/M3, y deja escrito
+explícitamente: *"Production (Fase 10) requirement:
+`OPENALICE_RISK_ENGINE_ENABLED=1` is mandatory"* — cómo se garantiza eso
+operacionalmente (systemd, Compose, o una aserción propia del tooling de
+despliegue) queda para cuando se escriba `deploy/RUNBOOK.md` en la Fase
+10; esta guía deja registrado el requisito para que no haya que
+redescubrirlo entonces. Registrada también en el índice de
+`docs/README.md`.
+
+**Tests, salida real** (`deployment-safety.spec.ts`, 6/6 verdes):
+
+```
+✓ refuses to start: policy path configured but the engine flag is off
+✓ refuses to start even if the flag is set to something other than "1" (e.g. "true")
+✓ starts fine, no warning, when both the policy path and the flag are set correctly
+✓ starts fine but with a visible warning when the flag is off and no policy path is set (intentional local dev)
+✓ starts fine, no warning, when the flag is on even without an explicit policy path (falls back to the default path)
+✓ treats a blank/whitespace-only policy path as not set
+
+Test Files  1 passed (1)
+     Tests  6 passed (6)
+```
+
+### 9.9 Ajuste — fail-closed en la propia escritura del estado (2026-09-26)
+
+**El hueco real, confirmado antes de arreglar nada:** `finalizeAllowed`/
+`finalizeRejected`/`finalize` en `risk-engine.ts` llamaban a
+`saveRiskState(...)` sin ningún `try/catch` propio. Si esa escritura
+fallaba definitivamente (después de agotar los reintentos EPERM/EBUSY de
+§9.3), la excepción se propagaba sin capturar hasta el `try/catch` por
+operación de `TradingGit.executePush()` — que sí bloqueaba ESA operación
+puntual, pero (a) nunca tocaba el kill switch, así que la SIGUIENTE
+operación seguía evaluándose con normalidad contra un estado que podría
+estar desactualizado, y (b) el error quedaba mezclado con cualquier otro
+error genérico de dispatch, sin una etiqueta distinguible.
+
+**Arreglo:** nueva función `persistOrForceHalt()` en `risk-engine.ts`,
+usada por las tres funciones `finalize*`. Si `saveRiskState` falla: se
+registra el error explícitamente (`console.error` con el prefijo
+`[uta:risk]`), se intenta (best-effort — puede fallar también, se traga
+esa segunda falla) persistir `HALT_NEW` con motivo
+`STATE_WRITE_FAILURE: ...`, y se devuelve un veredicto **forzado**
+`{allowed:false, ruleCode:'STATE_WRITE_FAILURE', killSwitch:'HALT_NEW'}`
+— sin importar qué había decidido la cadena de reglas (incluso si la
+cadena decía ALLOW).
+
+**Test, salida real capturada** (`risk-engine-write-failure.spec.ts`,
+aislado en su propio archivo porque usa `vi.mock` sobre `risk-state.js`
+para producir un fallo de escritura real y controlado, sin ensuciar los
+tests de sistema de archivos reales de `risk-engine.spec.ts`):
+
+```
+stderr | ... forces HALT_NEW and reports STATE_WRITE_FAILURE ...
+[uta:risk] risk state write failed definitively: simulated definitive disk failure (as if all EPERM/EBUSY retries were exhausted) — forcing HALT_NEW for account "risk-engine-write-failure-target" (not continuing on in-memory state)
+
+✓ forces HALT_NEW and reports STATE_WRITE_FAILURE instead of returning the rule chain's real (allow) verdict
+✓ also forces HALT_NEW when the write fails on a rule REJECTION path (not just the allow path)
+✓ an unrelated account (not sabotaged) is unaffected — the mock passes through to the real implementation
+
+Test Files  1 passed (1)
+     Tests  3 passed (3)
+```
+
+### 9.10 Resultado final tras los tres ajustes
+
+```
+cd services/uta && pnpm typecheck    # limpio
+cd services/uta && pnpm build        # limpio (dist/uta.js 333.97 KB)
+pnpm test:owner:uta                  # 65/65, 1130/1130 (flag off — 63/1121 + 9 tests nuevos)
+pnpm test:integration:uta            # 1/1, 15/15 (sin cambios)
+```
+
 ---
 
 ## Resumen de la línea de tiempo de esta sesión
