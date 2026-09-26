@@ -454,6 +454,75 @@ Test Files  18 passed (18)
 18 archivos / 74 tests en verde (antes de esta corrección: 17/67). Root
 typecheck y build del Engine también limpios.
 
+### 8.3 No-lookahead realista — 2026-09-26
+
+La trampa de §8.2 (`NO_LOOKAHEAD_BAIT_KEY` inyectada en `ctx.params`)
+probaba que la propia mecánica del test funciona, pero no representa
+ningún canal de fuga real: ninguna estrategia lee ese campo por
+accidente. Señalado correctamente: hacía falta una garantía real, no solo
+una prueba del arnés de test.
+
+**Lo nuevo, en producción, no solo en tests:**
+`services/engine/src/strategies/context-builder.ts` —
+`buildStrategyContext({bars, interval, asOf, params, position})` es
+ahora LA frontera entre datos crudos y lo que una estrategia puede ver.
+Garantiza que `ctx.bars` nunca incluye (1) ninguna barra con timestamp
+posterior a `asOf`, (2) la barra final si no cerró antes de `asOf` —
+sin confiar en que el llamador (`MarketDataStore`, o un futuro
+Backtester que mantenga el histórico completo en memoria por eficiencia)
+ya lo haya filtrado. Esta es la garantía real que pediste; la de la
+estrategia es secundaria.
+
+**Tests, con salida real capturada** (`context-builder.spec.ts`,
+7 tests, todos verdes):
+
+1. **A nivel del constructor de contexto** (la garantía primaria): dado
+   un dataset crudo con barras futuras Y una barra final sin cerrar,
+   `buildStrategyContext` nunca las incluye — verificado directamente
+   sobre el array resultante, sin pasar por ninguna estrategia.
+2. **Trampa (a) — lee `ctx.bars` más allá de `asOf`**: `momentumStrategy`
+   (una estrategia real, no una trampa inventada) alimentada con un
+   dataset que incluye un salto de precio futuro. Sin pasar por el
+   builder (`{bars: rawDataset, ...}` directo — simula un llamador que
+   olvidó truncar): decide `ENTER`, usando el precio futuro como "hoy".
+   Pasando por `buildStrategyContext`: decide `NONE` — el futuro nunca
+   llega.
+3. **Trampa (b) — usa la vela abierta como si estuviera cerrada**: mismo
+   patrón, con la barra final sin cerrar (a `asOf` a mitad de sesión)
+   llevando un precio extremo. Sin el builder: `ENTER` (reaccionó a la
+   vela en formación). Con el builder: `NONE` (la vela abierta nunca
+   llega).
+4. **Trampa (c) — feature calculada con la barra t+1**: una función
+   `buggyDelta(values, i)` que deliberadamente lee `values[i+1]`. Bajo
+   truncamiento correcto (`values.slice(0, i+1)`), `values[i+1]` no
+   existe → `NaN`. Con el array completo (fuga de futuro): un número
+   real. Una función correcta (`correctDelta`) da el MISMO valor en
+   ambos casos — exactamente el patrón que ya prueban `adx.spec.ts`,
+   `rsi.spec.ts`, `sma.spec.ts` y `atr.spec.ts` para los indicadores
+   reales; esta es una versión mínima y deliberadamente rota para
+   ilustrar la clase de bug de forma directa.
+
+```
+✓ never includes bars timestamped after asOf, even when the raw dataset contains them
+✓ excludes the trailing bar specifically when it has not closed by asOf, independent of future bars
+✓ includes every closed bar up to and including one that closes exactly at asOf
+✓ Trap (a): momentum sees a future price spike if the caller bypasses buildStrategyContext, but never if it goes through it
+✓ Trap (b): momentum reacts to a still-forming candle when bypassing the builder, never when going through it
+✓ Trap (c): the buggy feature is undefined/NaN under proper truncation but "works" when future data leaks in
+✓ Trap (c): the correct feature is identical whether or not future data is present
+
+Test Files  1 passed (1)
+     Tests  7 passed (7)
+```
+
+La trampa original de `NO_LOOKAHEAD_BAIT_KEY` (§8.2) se mantiene sin
+cambios — sigue pasando (7/7) — como evidencia adicional de que el
+mecanismo del arnés de test también sigue intacto, no como la prueba
+principal.
+
+Suite completa del Engine tras este agregado: **19 archivos / 81 tests**,
+todos en verde (antes: 18/74). Root typecheck limpio.
+
 ---
 
 ## Resumen de la línea de tiempo de esta sesión
