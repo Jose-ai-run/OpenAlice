@@ -34,6 +34,7 @@ import type {
   SyncResult,
 } from './git/types.js'
 import { createGuardPipeline, resolveGuards } from './guards/index.js'
+import { wrapDispatcherWithRiskEngine } from './risk/risk-dispatcher.js'
 import './contract-ext.js'
 
 // ==================== Options ====================
@@ -195,11 +196,16 @@ export class UnifiedTradingAccount {
           throw new Error(`Unknown operation action: ${(op as { action: string }).action}`)
       }
     }
-    const guards = resolveGuards(options.guards ?? [])
+    const guards = resolveGuards(options.guards ?? [], this.id)
     const guardedDispatcher = createGuardPipeline(dispatcher, broker, guards)
+    // [PROPUESTA] Fase 4a M1 — RiskEngine.check as the FIRST step, before
+    // the guards above. Behind OPENALICE_RISK_ENGINE_ENABLED: with the
+    // flag unset, wrapDispatcherWithRiskEngine returns `guardedDispatcher`
+    // unchanged (same function reference), so this line is a no-op.
+    const riskCheckedDispatcher = wrapDispatcherWithRiskEngine(guardedDispatcher, broker, this.id)
 
     const gitConfig = {
-      executeOperation: guardedDispatcher,
+      executeOperation: riskCheckedDispatcher,
       getGitState: this._getState,
       onCommit: options.onCommit,
     }

@@ -32,6 +32,19 @@ export function createGuardPipeline(
       }
     }
 
-    return dispatcher(op)
+    const result = await dispatcher(op)
+
+    // [PROPUESTA] Fase 4a M3 — success hooks, purely additive: a guard
+    // without `recordSuccess` is completely unaffected. Only reached when
+    // `dispatcher(op)` resolved without throwing ("a successful dispatch").
+    for (const guard of guards) {
+      try {
+        await guard.recordSuccess?.(ctx)
+      } catch (err) {
+        console.warn(`[guard:${guard.name}] recordSuccess failed:`, err instanceof Error ? err.message : err)
+      }
+    }
+
+    return result
   }
 }

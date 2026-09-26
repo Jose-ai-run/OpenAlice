@@ -525,6 +525,168 @@ todos en verde (antes: 18/74). Root typecheck limpio.
 
 ---
 
+## 9. Fase 4a — RiskEngine (`feat/engine-f4a-risk-engine`) — 2026-09-25
+
+Primera fase que toca `services/uta/`. Cinco archivos existentes
+modificados (`UnifiedTradingAccount.ts`, `guards/{cooldown,guard-pipeline,
+registry,types}.ts`), todo lo demás nuevo bajo
+`services/uta/src/domain/trading/risk/`. Nada en `services/engine/`.
+
+### 9.1 Qué se construyó
+
+- **`risk/policy.ts`**: schema Zod (ADR-0004) + `loadRiskPolicy()`, nunca
+  lanza — toda falla (archivo ausente, JSON inválido, schema inválido)
+  resuelve a `{ok:false, reason}` para que el llamador falle cerrado
+  explícitamente.
+- **`risk/risk-state.ts`**: estado persistente, escritura atómica
+  (tmp+rename, a diferencia de `git-persistence.ts` — Fase 0 lo marcó como
+  no-atómico, y esta vez sí se corrige). `loadRiskState` (tolerante, usada
+  por kill-switch/cooldown) vs. `loadRiskStateStrict` (usada por el motor
+  principal — ver §9.2 sobre por qué hacían falta las dos).
+- **`risk/risk-log.ts`**: `risk-decisions.jsonl`, append-only.
+- **`risk/kill-switch.ts`**: `NORMAL | HALT_NEW | FLATTEN`, con `resetKillSwitch`
+  rechazando un reset de un halt por pérdida diaria (R16) sin `force`.
+- **`risk/rules/r0..r20-*.ts`**: un archivo por regla, funciones puras
+  (`(ctx: RiskContext) => RiskRuleRejection | null`), más `shared.ts` con
+  helpers de notional/exposición/equity.
+- **`risk/risk-engine.ts`**: `evaluateRisk()` — arma el `RiskContext`
+  (política, posiciones, cuenta, estado, quote, market clock, y para
+  `modifyOrder` el estado actual de la orden vía `broker.getOrders()`),
+  corre la cadena R0–R20, actualiza estado (rechazos consecutivos,
+  contador de trades, cooldown, HWM, kill switch), registra en el log.
+- **`risk/risk-dispatcher.ts`**: el punto de inserción M1 — con
+  `OPENALICE_RISK_ENGINE_ENABLED` sin definir, devuelve la MISMA
+  referencia de función `dispatcher` sin envolver nada.
+- **M1** (`UnifiedTradingAccount.ts`): `riskCheckedDispatcher =
+  wrapDispatcherWithRiskEngine(guardedDispatcher, broker, this.id)` — antes
+  de los guards existentes, como pide PROMPT_MASTER §5.
+- **M2** (`guards/registry.ts`): `OPENALICE_RISK_STRICT=1` → tipo de guard
+  desconocido lanza en vez de `console.warn` + skip.
+- **M3** (`guards/cooldown.ts`): con el flag de RiskEngine activo, `check()`
+  ya no escribe nada (se lo cede a R13, que lee el mismo estado
+  persistente) y un nuevo `recordSuccess()` — llamado por
+  `guard-pipeline.ts` solo después de que `dispatcher(op)` resuelve sin
+  lanzar — escribe el cooldown. Con el flag apagado, sigue exactamente el
+  comportamiento original (Map en memoria, se escribe dentro de `check()`).
+  `guards/types.ts` y `guard-pipeline.ts` ganaron un hook opcional
+  `recordSuccess` — aditivo, ningún guard existente lo implementa.
+
+### 9.2 Un hallazgo real encontrado construyendo esto (no un hallazgo del repo — de mi propio diseño)
+
+Mi primera versión de `loadRiskState` trataba CUALQUIER error de lectura
+(archivo ausente **o** archivo corrupto) igual: devolvía un estado inicial
+fresco (`killSwitch: 'NORMAL'`). Eso es exactamente lo opuesto de
+fail-closed — un archivo de estado corrompido habría *enmascarado* un
+`HALT_NEW`/`FLATTEN` existente en vez de bloquear. Lo encontré yo mismo
+escribiendo el test de "estado corrupto → HALT_NEW" antes de que nadie más
+lo señalara, y lo corregí separando dos funciones: `loadRiskState`
+(tolerante — solo la usan `kill-switch.ts`/`cooldown.ts`, donde un archivo
+ausente es el caso normal y el llamador está a punto de escribir un valor
+nuevo de todos modos) y `loadRiskStateStrict` (la que usa el flujo
+principal de `evaluateRisk` — un archivo ausente sigue siendo válido,
+"primera vez", pero un archivo presente que no parsea o le faltan campos
+requeridos devuelve `{ok:false}` explícito).
+
+### 9.3 Particularidad de Windows encontrada (no del repo — de mi propia implementación)
+
+El primer test de concurrencia sobre `saveRiskState` (10 guardados en
+paralelo al mismo archivo) falló primero con `ENOENT` (dos escrituras
+concurrentes podían generar el MISMO nombre de archivo temporal —
+`pid+Date.now()` no es único bajo `Promise.all`, corregido añadiendo
+`randomUUID()`), y luego con `EPERM` incluso con nombres de tmp únicos:
+Windows puede rechazar transitoriamente un `rename()` hacia un destino que
+otro handle está tocando en ese instante — a diferencia de POSIX, donde
+`rename(2)` es atómico y no falla así. `saveRiskState` ahora reintenta
+(hasta 5 veces, backoff corto) específicamente sobre `EPERM`/`EBUSY`. En
+uso real esto es infrecuente (`evaluateRisk` de una cuenta corre de a una
+operación por vez — `TradingGit` ya serializa "un solo commit pendiente
+por cuenta"), pero la función es una primitiva de persistencia reusable y
+no debía asumirlo.
+
+### 9.4 Resultados reales — flag apagado (línea base, debe ser idéntica a Fase 0)
+
+```
+pnpm test:owner:uta
+  Test Files  58 passed (58)
+       Tests  1055 passed (1055)
+
+pnpm test:integration:uta
+  Test Files  1 passed (1)
+       Tests  15 passed (15)
+```
+
+Coincide exactamente con la línea base de Fase 0 (§3 de este documento).
+Con los 5 archivos nuevos de tests del RiskEngine incluidos (que se
+configuran su propia política/flag por test, no dependen de estado
+ambiental), el total sube a **63 archivos / 1121 tests, todos en verde**,
+sin que ningún test preexistente cambie de resultado.
+
+### 9.5 Resultados reales — flag encendido, SIN política configurada
+
+```
+OPENALICE_RISK_ENGINE_ENABLED=1 pnpm test:owner:uta
+  Test Files  3 failed | 55 passed (58)
+       Tests  20 failed | 1035 passed (1055)
+
+OPENALICE_RISK_ENGINE_ENABLED=1 pnpm test:integration:uta
+  Test Files  1 failed (1)
+       Tests  12 failed | 3 passed (15)
+```
+
+**Esto es el comportamiento correcto, no una regresión.** Ningún test
+preexistente configura `OPENALICE_RISK_POLICY_PATH`, así que con el flag
+encendido el RiskEngine busca la política en
+`/etc/openalice/risk-policy.json` (no existe en esta máquina), falla
+cerrado, y bloquea toda escritura — exactamente lo que "política ausente
+→ HALT_NEW" exige. Los tests que fallan son los que esperaban que una
+orden llegara de verdad al broker; los que no tocan `placeOrder`/
+`modifyOrder` (o solo leen) siguen pasando. La demostración real de que el
+RiskEngine funciona **con** una política es la suite dedicada en
+`risk/*.spec.ts`, que sí la configura explícitamente por test.
+
+### 9.6 Los 5 tests de aceptación pedidos, con su resultado real
+
+1. **Flag apagado = idéntico a la línea base** — §9.4 arriba.
+2. **Las 4 rutas de escritura pasan por el RiskEngine, 0 llamadas a
+   `broker.placeOrder` cuando rechaza todo** —
+   `risk-dispatcher-integration.spec.ts`, 4/4 tests verdes:
+   - Ruta B (stage→commit→push a nivel de método UTA, la que respalda
+     `HTTP wallet/push` del lado servidor) y su variante vía HTTP real
+     (`app.request('/uta/:id/wallet/push')`).
+   - Ruta C (`HTTP wallet/place-order` one-shot).
+   - Rutas A (tool `tradingPush`) y D (push vía Connector) no se invocan
+     directamente (viven en `src/`, proceso Alice separado) — se
+     establece por lectura de código fresca en esta sesión que ambas
+     llaman a `UTAAccountSDK.push()`
+     (`src/services/uta-client/UTAAccountSDK.ts:290`), que hace POST al
+     MISMO endpoint `/wallet/push` que la ruta B ya prueba — Alice y UTA
+     son procesos separados que solo se comunican por HTTP (Fase 0), así
+     que no existe otro camino hacia el broker para A y D.
+3. **Fail-closed: política ausente, inválida, estado corrupto → HALT_NEW**
+   — `risk-engine.spec.ts`, 4/4 casos verdes (incluye JSON inválido, sin
+   entrada de cuenta, y estado corrupto además de archivo ausente).
+4. **`modifyOrder` que agranda una posición → rechazado** —
+   `risk-engine.spec.ts` + `rules.spec.ts` (R18), verde.
+5. **Kill switch persiste tras reiniciar UTA** — `risk-engine.spec.ts`
+   ("kill switch persists across a simulated restart", llama a
+   `evaluateRisk` dos veces sin ninguna referencia compartida en memoria
+   entre ambas llamadas, la segunda solo puede saber del halt leyéndolo
+   de disco) y `risk-state.spec.ts` (round-trip directo del estado), verde.
+
+### 9.7 Comandos ejecutados
+
+```
+cd services/uta && pnpm typecheck   # limpio
+cd services/uta && pnpm build       # limpio (dist/uta.js 331.59 KB)
+npx tsc --noEmit                    # limpio (raíz)
+pnpm test:owner:uta                 # 58/58, 1055/1055 (flag off) · 63/63, 1121/1121 (con los tests nuevos)
+pnpm test:integration:uta           # 1/1, 15/15 (flag off)
+OPENALICE_RISK_ENGINE_ENABLED=1 pnpm test:owner:uta        # 55/58, 1035/1055 (fail-closed sin política — esperado)
+OPENALICE_RISK_ENGINE_ENABLED=1 pnpm test:integration:uta  # ídem
+```
+
+---
+
 ## Resumen de la línea de tiempo de esta sesión
 
 - Herramientas verificadas: git 2.49.0, Node v24.12.0, pnpm 11.7.0 (vía `corepack pnpm`).

@@ -12,10 +12,19 @@ export interface GuardContext {
 export interface OperationGuard {
   readonly name: string
   check(ctx: GuardContext): Promise<string | null> | string | null
+  /**
+   * [PROPUESTA] Fase 4a M3 — called after a successful dispatch (the
+   * dispatcher resolved without throwing), so a guard can record state it
+   * only wants to commit once the operation actually went through, instead
+   * of when its own `check()` merely didn't reject. Optional: guards that
+   * don't implement it are completely unaffected — this is additive.
+   */
+  recordSuccess?(ctx: GuardContext): void | Promise<void>
 }
 
 /** Registry entry: type identifier + factory function. */
 export interface GuardRegistryEntry {
   type: string
-  create(options: Record<string, unknown>): OperationGuard
+  /** `accountId` is optional and new in Fase 4a — existing factories that ignore it are unaffected. */
+  create(options: Record<string, unknown>, accountId?: string): OperationGuard
 }
