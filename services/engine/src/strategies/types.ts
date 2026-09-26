@@ -19,7 +19,13 @@ export interface StrategyContext {
 }
 
 export type StrategyDecision =
-  | { kind: 'NONE' }
+  | {
+      kind: 'NONE'
+      /** Optional — populated with e.g. ['DEGENERATE_INPUT', 'flat_series']
+       *  when NONE means "input was unusable", not "no signal today". See
+       *  strategies/guards.ts. */
+      reasonCodes?: string[]
+    }
   | {
       kind: 'ENTER'
       side: 'long' | 'short'

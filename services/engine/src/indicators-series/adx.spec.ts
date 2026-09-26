@@ -50,6 +50,21 @@ describe('adxSeries — 1e-9 against a hand-traced reference', () => {
     expect(highs).toEqual(HLC_FIXTURE.highs)
   })
 
+  it('never produces NaN/Infinity on a perfectly flat series (zero true range)', () => {
+    // high===low===close, unchanging, for every bar -> smoothed TR is
+    // exactly 0. Corrected 2026-09-25: this must stay finite (0), not NaN.
+    const flatHighs = new Array(20).fill(100)
+    const flatLows = new Array(20).fill(100)
+    const flatCloses = new Array(20).fill(100)
+    const out = adxSeries(flatHighs, flatLows, flatCloses, 3)
+    for (const v of out) {
+      if (v !== null) {
+        expect(Number.isFinite(v)).toBe(true)
+        expect(v).toBe(0)
+      }
+    }
+  })
+
   it('respects no-lookahead: truncating future bars does not change past values', () => {
     const truncated = adxSeries(highs.slice(0, 7), lows.slice(0, 7), closes.slice(0, 7), 3)
     for (let i = 0; i < truncated.length; i++) {

@@ -2,6 +2,7 @@ import { z } from 'zod'
 import { classifyRegimeSeries } from '../regime/regime-classifier.js'
 import { trendFollowingStrategy, trendFollowingParamsSchema } from './trend-following.js'
 import { meanReversionStrategy, meanReversionParamsSchema } from './mean-reversion.js'
+import { noneDegenerate, withDegenerateGuard } from './guards.js'
 import type { Strategy, StrategyContext, StrategyDecision } from './types.js'
 
 /**
@@ -18,7 +19,7 @@ export const regimeSwitchParamsSchema = z.object({
 })
 export type RegimeSwitchParams = z.infer<typeof regimeSwitchParamsSchema>
 
-export const regimeSwitchStrategy: Strategy = {
+const regimeSwitchStrategyImpl: Strategy = {
   id: 'regime-switch',
   version: '0.1.0',
   paramsSchema: regimeSwitchParamsSchema,
@@ -36,7 +37,7 @@ export const regimeSwitchStrategy: Strategy = {
     const regimes = classifyRegimeSeries(ctx.bars, params.adxPeriod, params.adxThreshold)
     const regime = regimes[regimes.length - 1] ?? 'unknown'
 
-    if (regime === 'unknown') return { kind: 'NONE' }
+    if (regime === 'unknown') return noneDegenerate('adx_unavailable')
 
     const delegate = regime === 'trending' ? trendFollowingStrategy : meanReversionStrategy
     const delegateParams = regime === 'trending' ? params.trending : params.ranging
@@ -46,3 +47,6 @@ export const regimeSwitchStrategy: Strategy = {
     return { ...decision, reasonCodes: [...decision.reasonCodes, `regime:${regime}`] }
   },
 }
+
+/** Guarded export — see guards.ts. This is what every consumer imports. */
+export const regimeSwitchStrategy: Strategy = withDegenerateGuard(regimeSwitchStrategyImpl)

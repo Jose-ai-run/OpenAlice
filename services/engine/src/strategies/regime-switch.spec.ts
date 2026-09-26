@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { regimeSwitchStrategy } from './regime-switch.js'
 import { vShapedBars, oscillatingBars, flatBars } from './test-fixtures.js'
 import { assertPure, assertDeterministic, assertNoLookahead, walkForward } from './purity-helpers.js'
+import { DEGENERATE_INPUT } from './guards.js'
 
 const params = {
   adxPeriod: 14,
@@ -22,13 +23,13 @@ describe('regimeSwitchStrategy', () => {
     }
   })
 
-  it('on a flat series, ADX is near-zero -> ranging -> delegates to mean-reversion, which is itself degenerate on flat data (see mean-reversion.spec.ts): at most one entry, then holds', () => {
+  it('on a flat series, ADX is 0 -> ranging -> delegates to mean-reversion, which is itself degenerate on flat-close data (see mean-reversion.spec.ts): never enters, all NONE decisions carry DEGENERATE_INPUT', () => {
     const decisions = walkForward(regimeSwitchStrategy, flatBars(50), params, 30)
-    const entries = decisions.filter((d) => d.decision.kind === 'ENTER')
-    expect(entries.length).toBeLessThanOrEqual(1)
-    if (entries.length === 1) {
-      const afterEntry = decisions.slice(decisions.indexOf(entries[0]!) + 1)
-      expect(afterEntry.every((d) => d.decision.kind === 'NONE')).toBe(true)
+    expect(decisions.every((d) => d.decision.kind === 'NONE')).toBe(true)
+    const pastFullWarmup = decisions.filter((d) => d.index >= 30 + params.ranging.rsiPeriod)
+    expect(pastFullWarmup.length).toBeGreaterThan(0)
+    for (const d of pastFullWarmup) {
+      expect((d.decision as { reasonCodes?: string[] }).reasonCodes).toContain(DEGENERATE_INPUT)
     }
   })
 

@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { noneDegenerate, withDegenerateGuard } from './guards.js'
 import type { Strategy, StrategyContext, StrategyDecision } from './types.js'
 
 /**
@@ -12,7 +13,7 @@ export const breakoutParamsSchema = z.object({
 })
 export type BreakoutParams = z.infer<typeof breakoutParamsSchema>
 
-export const breakoutStrategy: Strategy = {
+const breakoutStrategyImpl: Strategy = {
   id: 'breakout',
   version: '0.1.0',
   paramsSchema: breakoutParamsSchema,
@@ -24,7 +25,7 @@ export const breakoutStrategy: Strategy = {
     const params = breakoutParamsSchema.parse(ctx.params)
     const n = ctx.bars.length
     const i = n - 1
-    if (i < params.lookback) return { kind: 'NONE' }
+    if (i < params.lookback) return noneDegenerate('insufficient_data')
 
     // Prior window EXCLUDES the current bar — comparing against a threshold
     // that includes today's own high/low would make every bar trivially
@@ -33,6 +34,13 @@ export const breakoutStrategy: Strategy = {
     const priorHigh = Math.max(...window.map((b) => Number(b.high)))
     const priorLow = Math.min(...window.map((b) => Number(b.low)))
     const close = Number(ctx.bars[i]!.close)
+    if (!Number.isFinite(priorHigh) || !Number.isFinite(priorLow) || !Number.isFinite(close)) {
+      return noneDegenerate('non_finite_price')
+    }
+    // A zero-range prior window (every high/low identical) makes ANY move
+    // read as a "breakout" — that's not a real signal, it's an artifact of
+    // no volatility to break out of.
+    if (priorHigh === priorLow) return noneDegenerate('zero_range_window')
 
     if (ctx.position) {
       // Simple symmetric exit: price re-enters the prior range.
@@ -64,3 +72,6 @@ export const breakoutStrategy: Strategy = {
     return { kind: 'NONE' }
   },
 }
+
+/** Guarded export — see guards.ts. This is what every consumer imports. */
+export const breakoutStrategy: Strategy = withDegenerateGuard(breakoutStrategyImpl)

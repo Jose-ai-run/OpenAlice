@@ -9,7 +9,7 @@
     "dev": "tsx watch src/main.ts",
     "start": "node dist/engine.cjs",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run --root ../.. --config vitest.config.ts --project node services/engine/src"
+    "test": "vitest run --root ../.. --config vitest.config.ts --project node services/engine/src services/engine/test"
   },
   "dependencies": {
     "@hono/node-server": "^2.0.12",

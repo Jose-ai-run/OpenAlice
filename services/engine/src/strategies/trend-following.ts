@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { smaSeries } from '../indicators-series/sma.js'
 import { atrSeries } from '../indicators-series/atr.js'
+import { noneDegenerate, withDegenerateGuard } from './guards.js'
 import type { Strategy, StrategyContext, StrategyDecision } from './types.js'
 
 /**
@@ -26,7 +27,7 @@ function lows(bars: StrategyContext['bars']): number[] {
   return bars.map((b) => Number(b.low))
 }
 
-export const trendFollowingStrategy: Strategy = {
+const trendFollowingStrategyImpl: Strategy = {
   id: 'trend-following',
   version: '0.1.0',
   paramsSchema: trendFollowingParamsSchema,
@@ -42,15 +43,18 @@ export const trendFollowingStrategy: Strategy = {
     const atr = atrSeries(highs(ctx.bars), lows(ctx.bars), c, params.atrPeriod)
 
     const i = ctx.bars.length - 1
-    if (i < 1) return { kind: 'NONE' }
+    if (i < 1) return noneDegenerate('insufficient_data')
     const fastNow = fast[i]
     const slowNow = slow[i]
     const fastPrev = fast[i - 1]
     const slowPrev = slow[i - 1]
     const atrNow = atr[i]
     if (fastNow == null || slowNow == null || fastPrev == null || slowPrev == null || atrNow == null) {
-      return { kind: 'NONE' }
+      return noneDegenerate('insufficient_data')
     }
+    // ATR of exactly 0 (a flat window) would produce stop === entry — a
+    // stop that triggers immediately rather than protecting anything.
+    if (atrNow === 0) return noneDegenerate('atr_zero')
 
     const crossedUp = fastPrev <= slowPrev && fastNow > slowNow
     const crossedDown = fastPrev >= slowPrev && fastNow < slowNow
@@ -89,3 +93,6 @@ export const trendFollowingStrategy: Strategy = {
     return { kind: 'NONE' }
   },
 }
+
+/** Guarded export — see guards.ts. This is what every consumer imports. */
+export const trendFollowingStrategy: Strategy = withDegenerateGuard(trendFollowingStrategyImpl)

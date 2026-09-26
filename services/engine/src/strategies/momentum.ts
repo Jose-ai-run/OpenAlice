@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { noneDegenerate, withDegenerateGuard } from './guards.js'
 import type { Strategy, StrategyContext, StrategyDecision } from './types.js'
 
 /**
@@ -14,15 +15,18 @@ export const momentumParamsSchema = z.object({
 })
 export type MomentumParams = z.infer<typeof momentumParamsSchema>
 
-function roc(bars: StrategyContext['bars'], period: number, i: number): number | null {
-  if (i < period) return null
+type RocResult = { value: number } | { degenerate: string }
+
+function roc(bars: StrategyContext['bars'], period: number, i: number): RocResult | null {
+  if (i < period) return null // insufficient data — caller distinguishes this from degenerate
   const now = Number(bars[i]!.close)
   const then = Number(bars[i - period]!.close)
-  if (then === 0) return null
-  return (now - then) / then
+  if (!Number.isFinite(now) || !Number.isFinite(then)) return { degenerate: 'non_finite_price' }
+  if (then === 0) return { degenerate: 'zero_reference_price' } // would divide by zero
+  return { value: (now - then) / then }
 }
 
-export const momentumStrategy: Strategy = {
+const momentumStrategyImpl: Strategy = {
   id: 'momentum',
   version: '0.1.0',
   paramsSchema: momentumParamsSchema,
@@ -33,9 +37,12 @@ export const momentumStrategy: Strategy = {
   evaluate(ctx: StrategyContext): StrategyDecision {
     const params = momentumParamsSchema.parse(ctx.params)
     const i = ctx.bars.length - 1
-    const change = roc(ctx.bars, params.period, i)
-    if (change == null) return { kind: 'NONE' }
+    const rocResult = roc(ctx.bars, params.period, i)
+    if (rocResult == null) return noneDegenerate('insufficient_data')
+    if ('degenerate' in rocResult) return noneDegenerate(rocResult.degenerate)
+    const change = rocResult.value
     const price = Number(ctx.bars[i]!.close)
+    if (!Number.isFinite(price)) return noneDegenerate('non_finite_price')
 
     if (ctx.position) {
       const faded = ctx.position.side === 'long' ? change <= 0 : change >= 0
@@ -68,3 +75,6 @@ export const momentumStrategy: Strategy = {
     return { kind: 'NONE' }
   },
 }
+
+/** Guarded export — see guards.ts. This is what every consumer imports. */
+export const momentumStrategy: Strategy = withDegenerateGuard(momentumStrategyImpl)

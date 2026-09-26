@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { trendFollowingStrategy } from './trend-following.js'
-import { vShapedBars, flatBars } from './test-fixtures.js'
+import { vShapedBars, flatBars, perfectlyFlatBars } from './test-fixtures.js'
 import { assertPure, assertDeterministic, assertNoLookahead, walkForward } from './purity-helpers.js'
+import { DEGENERATE_INPUT } from './guards.js'
 import type { StrategyDecision } from './types.js'
 
 const params = { fastPeriod: 5, slowPeriod: 15, atrPeriod: 14, atrStopMultiplier: 2 }
@@ -22,6 +23,16 @@ describe('trendFollowingStrategy', () => {
   it('never enters on a flat series (no crossover possible)', () => {
     const decisions = walkForward(trendFollowingStrategy, flatBars(40), params, 16)
     expect(decisions.every((d) => d.decision.kind === 'NONE')).toBe(true)
+  })
+
+  it('refuses to enter when ATR is exactly 0 (a zero-width stop would trigger instantly)', () => {
+    const decisions = walkForward(trendFollowingStrategy, perfectlyFlatBars(40), params, 16)
+    const pastWarmup = decisions.filter((d) => d.index >= 16 + params.atrPeriod)
+    expect(pastWarmup.length).toBeGreaterThan(0)
+    for (const d of pastWarmup) {
+      expect(d.decision.kind).toBe('NONE')
+      expect((d.decision as { reasonCodes?: string[] }).reasonCodes).toContain(DEGENERATE_INPUT)
+    }
   })
 
   it('is pure, deterministic, and does not look ahead', () => {

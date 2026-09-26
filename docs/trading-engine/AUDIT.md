@@ -339,6 +339,123 @@ el código de `agent-probe.ts` no suprime explícitamente.
 
 ---
 
+## 8. Correcciones a `feat/engine-f3-strategy-engine` — 2026-09-25
+
+Dos correcciones pedidas explícitamente antes de la Fase 4, ambas sobre
+código y tests ya committeados en esa rama, ninguna sobre `src/` ni
+`services/uta/`.
+
+### 8.1 Por qué la corrección anterior del test de `mean-reversion` estaba mal
+
+**Lo que hice mal (commit `b1f28d23`, ya en esta rama antes de esta
+corrección):** `rsi.ts` devolvía `100` siempre que `avgLoss === 0`,
+copiando literalmente el comportamiento del `RSI()` escalar de
+`src/domain/analysis/indicator/functions/technical.ts` (que hace lo
+mismo). En una serie de cierres perfectamente plana, `avgGain` **también**
+es `0` — no solo `avgLoss`. Matemáticamente, `RSI = 100 - 100/(1 +
+avgGain/avgLoss)` con `avgGain=avgLoss=0` es `0/0`, **indefinido**, no
+"100% sobrecomprado". Cuando escribí el test de `mean-reversion.spec.ts`
+para una serie plana (`flatBars`) y vi que el código entraba en corto
+(porque RSI=100 disparaba `overbought`), **ajusté el test para esperar
+esa entrada en corto**, con un comentario que decía que era el
+comportamiento "correcto" citando el `RSI()` de `src/` como precedente.
+
+Eso es exactamente el error que señalaste: adapté el test al código en
+vez de preguntarme si el código tenía razón. El hecho de que
+`src/domain/analysis/indicator/functions/technical.ts` tenga el mismo
+comportamiento no lo vuelve correcto — es la misma clase de bug,
+simplemente ya presente en otro lugar del repo (que no toco, por mandato
+explícito). Un RSI=100 en una serie sin ningún movimiento no es una señal
+de sobrecompra real; es una división por cero disfrazada de valor válido
+por una convención de implementación que colapsa dos casos distintos
+(`avgLoss=0` con movimiento real vs. `avgGain=avgLoss=0` sin movimiento
+alguno) en la misma rama de código.
+
+**La corrección real** (este commit): `rsi.ts` ahora distingue
+explícitamente los dos casos (`rsiFromAverages()`): `avgGain=avgLoss=0` →
+`null` (indefinido); `avgLoss=0` con `avgGain>0` → `100` (bien definido,
+sin cambios). `mean-reversion.ts` (y las demás estrategias, ver §8.2 más
+abajo) ahora tratan cualquier indicador `null`/no-finito como una entrada
+degenerada — `NONE` con `reasonCodes` que incluyen `DEGENERATE_INPUT` y
+una razón específica (`flat_series_rsi_undefined`, `atr_zero`,
+`zero_range_window`, `zero_reference_price`, `insufficient_data`,
+`non_finite_price`, `non_finite_decision_field`, `zero_width_stop`) —
+nunca silenciosamente tratan el `null`/`NaN` como una señal operable. El
+test de `mean-reversion.spec.ts` para una serie plana ahora verifica
+exactamente eso: cero entradas, `DEGENERATE_INPUT` en cada decisión
+posterior al warmup.
+
+Además de esa corrección puntual, `services/engine/src/strategies/guards.ts`
+añade un backstop centralizado (`withDegenerateGuard`, aplicado a las
+cinco estrategias en su punto de exportación): cualquier decisión `ENTER`
+con un campo numérico no finito, o con `stop === entry` (ancho de stop
+cero — lo que un ATR de 0 produciría si algo se me hubiera escapado en el
+guard específico de `trend-following`), se degrada a `NONE +
+DEGENERATE_INPUT` automáticamente, sin importar qué estrategia la generó
+ni si el autor de esa estrategia pensó en ese caso límite específico.
+`adx.ts` también se corrigió de forma análoga: un rango verdadero suavizado
+de exactamente 0 (ventana completamente plana) ya no produce `NaN` al
+dividir — se define como `+DI=-DI=DX=0` (cero movimiento direccional
+medible es una lectura razonable de cero rango medible, documentado en el
+propio archivo).
+
+### 8.2 Prueba de mutación del no-lookahead
+
+Encontraste algo que yo mismo había anotado como preocupación interna sin
+llegar a corregirlo: `assertNoLookahead` original solo comparaba
+`fullA.slice(0,k)` contra `fullB.slice(0,k)` — dos arrays **idénticos en
+contenido** por construcción (todo caller ya garantizaba que `fullA` y
+`fullB` coincidieran hasta `k`). Cualquier función pura que solo lea
+`ctx.bars` pasa esa comparación trivialmente, por la sola forma del tipo,
+sin que la aserción haga ningún trabajo real — no podía haber detectado
+un lookahead real, porque no había ninguna diferencia real que detectar
+entre las dos llamadas.
+
+**La corrección** (`purity-helpers.ts`): `assertNoLookahead` ahora
+también inyecta las barras posteriores a `k` dentro de `ctx.params`, bajo
+una clave (`NO_LOOKAHEAD_BAIT_KEY`), **distinta** entre `fullA` y `fullB`.
+Como los cinco schemas Zod de las estrategias no usan `.strict()`, Zod
+descarta esa clave en silencio al parsear — invisible para cualquier
+estrategia correcta, que nunca lee `ctx.params` crudo, solo su propio
+`paramsSchema.parse(ctx.params)` tipado. Una estrategia que sí leyera un
+canal lateral como ese (el patrón real de un bug de lookahead: datos de
+depuración o contexto extra filtrándose por un campo `unknown`) ahora sí
+diverge entre las dos llamadas, y la aserción lo detecta.
+
+**Prueba de que la aserción corregida tiene dientes** — `test/property/`:
+`lookahead-trap-strategy.ts` es una estrategia deliberadamente rota que
+lee ese canal lateral y decide en función del cierre del día siguiente.
+`lookahead-trap.spec.ts` demuestra, con salida real capturada (no
+resumida):
+
+```
+✓ la trampa SÍ ve el futuro (chequeo de cordura sobre la trampa misma)
+× assertNoLookahead FAILS (throws) against the trap strategy — TEMP UNWRAPPED FOR REAL OUTPUT
+  → expected { kind: 'ENTER', side: 'long', …(4) } to deeply equal { kind: 'NONE' }
+  AssertionError: expected { kind: 'ENTER', side: 'long', …(4) } to deeply equal { kind: 'NONE' }
+  - Expected            + Received
+    { "kind": "NONE" }    { "entry": 120, "kind": "ENTER", "reasonCodes": ["saw_the_future"], "score": 1, "side": "long", "stop": 119 }
+   ❯ assertNoLookahead services/engine/src/strategies/purity-helpers.ts:100:13
+  Test Files  1 failed | Tests  1 failed | 6 passed (7)
+```
+
+(Esa ejecución se hizo con la aserción temporalmente desenvuelta —sin el
+`expect(...).toThrow()`— específicamente para capturar el fallo crudo;
+revertido antes de comitear.) Luego, con la aserción envuelta de nuevo
+(`expect(() => assertNoLookahead(trap, ...)).toThrow()`), la suite
+completa —incluidas las cinco estrategias A–E contra la misma
+`assertNoLookahead` corregida— pasa:
+
+```
+Test Files  18 passed (18)
+     Tests  74 passed (74)
+```
+
+18 archivos / 74 tests en verde (antes de esta corrección: 17/67). Root
+typecheck y build del Engine también limpios.
+
+---
+
 ## Resumen de la línea de tiempo de esta sesión
 
 - Herramientas verificadas: git 2.49.0, Node v24.12.0, pnpm 11.7.0 (vía `corepack pnpm`).

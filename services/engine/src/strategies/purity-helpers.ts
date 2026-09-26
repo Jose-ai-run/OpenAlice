@@ -56,10 +56,35 @@ export function assertDeterministic(strategy: Strategy, ctx: StrategyContext): v
 }
 
 /**
+ * The name every side-channel bait field is smuggled under. Exported so
+ * test/property/lookahead-trap-strategy.ts can read the same name; a real
+ * strategy has no reason to know this name exists and never reads it.
+ */
+export const NO_LOOKAHEAD_BAIT_KEY = '__noLookaheadBaitFutureBars'
+
+/**
  * The decision at cut point `k` (i.e. evaluated on bars[0..k)) must be
- * identical regardless of what the underlying data looks like AFTER k —
- * demonstrated with two full histories that agree up to k and diverge
- * after it.
+ * identical regardless of what the underlying data looks like AFTER k.
+ *
+ * CORRECTED 2026-09-25: the original version only ever compared
+ * `fullA.slice(0, k)` against `fullB.slice(0, k)` — two arrays that are
+ * *content-identical by construction* whenever fullA/fullB agree up to k
+ * (which every caller arranges). A strategy that only reads `ctx.bars`
+ * therefore passed trivially, by the type signature alone, without this
+ * assertion doing any real work — it could not have caught a real
+ * lookahead bug, only a purity bug tied to array *identity*. See
+ * test/property/lookahead-trap.spec.ts for the mutation test that exposed
+ * this and proves the fix below actually has teeth.
+ *
+ * Fix: also smuggle the bars AFTER `k` into `ctx.params` under
+ * `NO_LOOKAHEAD_BAIT_KEY`, differently for fullA and fullB. Every current
+ * strategy parses `ctx.params` through a Zod object schema that silently
+ * strips unrecognized keys (none of our schemas use `.strict()`), so this
+ * is invisible to correctly-written strategies — they never look at raw
+ * `ctx.params`, only at their own parsed, typed params. A strategy that
+ * DOES read this side channel (the realistic shape of a lookahead bug:
+ * extra debug/context data leaking through an `unknown`-typed params
+ * field) now diverges between the two calls and this assertion catches it.
  */
 export function assertNoLookahead(
   strategy: Strategy,
@@ -68,7 +93,9 @@ export function assertNoLookahead(
   k: number,
   params: unknown,
 ): void {
-  const a = strategy.evaluate({ bars: fullA.slice(0, k), interval: '1d', params })
-  const b = strategy.evaluate({ bars: fullB.slice(0, k), interval: '1d', params })
+  const paramsA = { ...(params as Record<string, unknown> ?? {}), [NO_LOOKAHEAD_BAIT_KEY]: fullA.slice(k) }
+  const paramsB = { ...(params as Record<string, unknown> ?? {}), [NO_LOOKAHEAD_BAIT_KEY]: fullB.slice(k) }
+  const a = strategy.evaluate({ bars: fullA.slice(0, k), interval: '1d', params: paramsA })
+  const b = strategy.evaluate({ bars: fullB.slice(0, k), interval: '1d', params: paramsB })
   expect(a).toEqual(b)
 }

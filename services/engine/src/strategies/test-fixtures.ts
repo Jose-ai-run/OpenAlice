@@ -71,3 +71,16 @@ export function flatBars(n: number, price = 100): Bar[] {
   for (let i = 0; i < n; i++) bars.push(bar(i, price, price + 0.1, price - 0.1, price))
   return bars
 }
+
+/**
+ * TRULY flat: open===high===low===close, unchanging across every bar —
+ * zero true range, zero ATR, zero window range. Unlike flatBars() (which
+ * still has a 0.2 high/low spread and thus nonzero ATR), this is the
+ * fixture that actually exercises the degenerate-input guards (ATR=0,
+ * zero-range breakout window, RSI undefined) rather than "no signal".
+ */
+export function perfectlyFlatBars(n: number, price = 100): Bar[] {
+  const bars: Bar[] = []
+  for (let i = 0; i < n; i++) bars.push(bar(i, price, price, price, price))
+  return bars
+}

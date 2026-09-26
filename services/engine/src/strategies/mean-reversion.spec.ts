@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { meanReversionStrategy } from './mean-reversion.js'
 import { oscillatingBars, flatBars } from './test-fixtures.js'
 import { assertPure, assertDeterministic, assertNoLookahead, walkForward } from './purity-helpers.js'
+import { DEGENERATE_INPUT } from './guards.js'
 
 const params = { rsiPeriod: 14, oversold: 30, overbought: 70, exitMid: 50, stopPct: 0.02 }
 
@@ -27,13 +28,24 @@ describe('meanReversionStrategy', () => {
     }
   })
 
-  it('on a perfectly flat series, RSI is degenerate (100, not 50 — zero losses divides specially, matching src/domain/analysis/indicator/functions/technical.ts RSI()): enters short exactly once, then holds forever', () => {
+  it('on a flat-close series, RSI is undefined (avgGain=avgLoss=0) -> NONE with DEGENERATE_INPUT, never a false "overbought" entry', () => {
+    // Corrected 2026-09-25: this test used to assert the OPPOSITE — that
+    // the strategy enters short once (treating RSI=100 as legitimate
+    // overbought). That was wrong: it adapted the test to match a bug
+    // (RSI defaulting to 100 on zero movement) instead of fixing the bug.
+    // See docs/trading-engine/AUDIT.md for the full account, and
+    // rsi.ts's rsiFromAverages() for the actual fix. flatBars() has a
+    // constant close (RSI is close-only), so it IS the degenerate case
+    // even though its high/low spread is nonzero.
     const decisions = walkForward(meanReversionStrategy, flatBars(40), params, 15)
     const entries = decisions.filter((d) => d.decision.kind === 'ENTER')
-    expect(entries).toHaveLength(1)
-    expect((entries[0]!.decision as { side: string }).side).toBe('short')
-    const afterEntry = decisions.slice(decisions.indexOf(entries[0]!) + 1)
-    expect(afterEntry.every((d) => d.decision.kind === 'NONE')).toBe(true)
+    expect(entries).toHaveLength(0)
+    const pastWarmup = decisions.filter((d) => d.index >= 15 + params.rsiPeriod)
+    expect(pastWarmup.length).toBeGreaterThan(0)
+    for (const d of pastWarmup) {
+      expect(d.decision.kind).toBe('NONE')
+      expect((d.decision as { reasonCodes?: string[] }).reasonCodes).toContain(DEGENERATE_INPUT)
+    }
   })
 
   it('is pure, deterministic, and does not look ahead', () => {

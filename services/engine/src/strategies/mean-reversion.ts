@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { rsiSeries } from '../indicators-series/rsi.js'
+import { noneDegenerate, withDegenerateGuard } from './guards.js'
 import type { Strategy, StrategyContext, StrategyDecision } from './types.js'
 
 /**
@@ -20,7 +21,7 @@ function closes(bars: StrategyContext['bars']): number[] {
   return bars.map((b) => Number(b.close))
 }
 
-export const meanReversionStrategy: Strategy = {
+const meanReversionStrategyImpl: Strategy = {
   id: 'mean-reversion',
   version: '0.1.0',
   paramsSchema: meanReversionParamsSchema,
@@ -33,10 +34,18 @@ export const meanReversionStrategy: Strategy = {
     const c = closes(ctx.bars)
     const rsi = rsiSeries(c, params.rsiPeriod)
     const i = ctx.bars.length - 1
-    if (i < 0) return { kind: 'NONE' }
+    if (i < 0) return noneDegenerate('insufficient_data')
     const rsiNow = rsi[i]
-    if (rsiNow == null) return { kind: 'NONE' }
+    if (rsiNow == null) {
+      // Two distinct causes collapse to the same `null`: not enough bars
+      // yet, or (rarer) a perfectly flat window where RSI is genuinely
+      // undefined (avgGain=avgLoss=0 — see rsi.ts's rsiFromAverages).
+      // Corrected 2026-09-25: this used to fall through and read RSI as
+      // 100 (see docs/trading-engine/AUDIT.md) — now it's explicit.
+      return noneDegenerate(i < params.rsiPeriod ? 'insufficient_data' : 'flat_series_rsi_undefined')
+    }
     const price = c[i]!
+    if (!Number.isFinite(price)) return noneDegenerate('non_finite_price')
 
     if (ctx.position) {
       const backToMid = ctx.position.side === 'long' ? rsiNow >= params.exitMid : rsiNow <= params.exitMid
@@ -67,3 +76,6 @@ export const meanReversionStrategy: Strategy = {
     return { kind: 'NONE' }
   },
 }
+
+/** Guarded export — see guards.ts. This is what every consumer imports. */
+export const meanReversionStrategy: Strategy = withDegenerateGuard(meanReversionStrategyImpl)

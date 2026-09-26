@@ -19,6 +19,15 @@
  * Verified in adx.spec.ts to 1e-9 against an independently written,
  * differently-structured reference computation (plain loops, no shared
  * helpers with this file) over a hand-traceable 10-bar fixture.
+ *
+ * Degenerate case, added 2026-09-25: smoothed TR can be exactly 0 (a
+ * perfectly flat window — high===low===prevClose for `period` consecutive
+ * bars), which would divide by zero computing +DI/-DI. Defined behavior:
+ * zero range means zero measurable directional movement, so +DI=-DI=0 for
+ * that index, and DX (which would then divide 0/0) is likewise defined as
+ * 0 — "no measurable trend strength" is the correct reading of "no
+ * measurable range at all", not NaN. This keeps adxSeries's output always
+ * finite; it never returns NaN or Infinity for finite inputs.
  */
 export function adxSeries(
   highs: readonly number[],
@@ -53,9 +62,11 @@ export function adxSeries(
   // smX[0] corresponds to tr index (period-1) -> bar index period.
 
   const dx: number[] = smTR.map((t, i) => {
+    if (t === 0) return 0 // zero range -> zero measurable directional movement, not NaN
     const plusDI = 100 * (smPlusDM[i]! / t)
     const minusDI = 100 * (smMinusDM[i]! / t)
-    return 100 * Math.abs(plusDI - minusDI) / (plusDI + minusDI)
+    const diSum = plusDI + minusDI
+    return diSum === 0 ? 0 : 100 * Math.abs(plusDI - minusDI) / diSum
   })
   if (dx.length < period) return out
 
