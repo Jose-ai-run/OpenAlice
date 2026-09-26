@@ -181,4 +181,4 @@ default.
 | Policy schema | `risk/policy.ts` + ADR-0004 if the shape changes meaningfully |
 | Kill switch semantics | `risk/kill-switch.ts` + `risk-state.spec.ts` |
 | Deployment-safety gate | `risk/deployment-safety.ts` + this guide's "Deployment safety" section |
-| Auth on top of this (tokens/scopes) | Fase 4b, ADR-0003 — a separate concern from the risk gate itself |
+| Auth on top of this (tokens/scopes) | [[docs/uta-auth.md]] (Fase 4b, ADR-0003) — a separate concern from the risk gate itself |

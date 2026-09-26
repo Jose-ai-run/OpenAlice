@@ -142,7 +142,10 @@ async function main() {
   }
   const utaDisabled = currentTradingModePolicy().mode === 'lite'
   const utaUrl = resolveUTAUrl()
-  const utaClient = createUTAClient({ baseUrl: utaUrl })
+  // [PROPUESTA] Fase 4b (M8, ADR-0003) — Alice's single service credential.
+  // Undefined when UTA runs in compatibility mode; UTA ignores the header
+  // either way, so this is safe to leave unset in local dev.
+  const utaClient = createUTAClient({ baseUrl: utaUrl, token: process.env['OPENALICE_UTA_TOKEN'] })
   if (utaDisabled) {
     console.warn('uta: disabled by trading mode lite — continuing without trading carrier')
   } else {

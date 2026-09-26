@@ -2,8 +2,10 @@
  * UTA service entry — co-located v1.
  *
  * Owns the trading domain (broker connections, git-like approval state,
- * snapshots, FX). Bind 127.0.0.1-only — Alice talks to UTA via
- * `OPENALICE_UTA_URL`, never exposed externally.
+ * snapshots, FX). Binds to 127.0.0.1 by default (`OPENALICE_UTA_BIND_HOST`
+ * overrides it — refused without `OPENALICE_UTA_TOKENS_FILE`, see
+ * domain/trading/auth/deployment-safety.ts) — Alice talks to UTA via
+ * `OPENALICE_UTA_URL`.
  *
  * Startup path is also the reload path: when broker config changes, Alice
  * touches `data/control/restart-uta.flag`, Guardian SIGTERMs this process
@@ -33,7 +35,9 @@ import { startOrderSyncPoller } from './domain/trading/order-sync-poller.js'
 import { buildKeylessDataUTAs } from './domain/trading/keyless-data-sources.js'
 import { createTradingRoutes } from './http/routes-trading.js'
 import { createSimulatorRoutes } from './http/routes-simulator.js'
+import { utaAuthMiddleware } from './http/auth.js'
 import { checkRiskEngineDeploymentSafety } from './domain/trading/risk/deployment-safety.js'
+import { checkUtaAuthDeploymentSafety, resolveUtaBindHost } from './domain/trading/auth/deployment-safety.js'
 import type { UTAEngineContext } from './types.js'
 
 const UTA_PORT = Number(process.env['OPENALICE_UTA_PORT'] ?? 47333)
@@ -52,6 +56,16 @@ export async function startUTAService(): Promise<void> {
     process.exit(1)
   }
   if (riskSafety.warn) console.warn(riskSafety.warn)
+
+  // [PROPUESTA] Fase 4b auth deployment-safety gate — a non-loopback bind
+  // with no tokens file would expose the trading-write chokepoint with no
+  // authentication. See docs/uta-auth.md.
+  const authSafety = checkUtaAuthDeploymentSafety()
+  if (!authSafety.ok) {
+    console.error(`[uta] fatal: ${authSafety.error}`)
+    process.exit(1)
+  }
+  if (authSafety.warn) console.warn(authSafety.warn)
 
   // Surface outbound-proxy config at startup so a user behind a proxy can
   // confirm UTA saw it — CCXT exchange instances are bridged onto it per
@@ -171,6 +185,11 @@ export async function startUTAService(): Promise<void> {
     fxService,
     snapshotService,
   }
+  // [PROPUESTA] Fase 4b — bearer-token auth (M7). No-op in compatibility
+  // mode (no OPENALICE_UTA_TOKENS_FILE); see http/auth.ts.
+  app.use('/api/trading/*', utaAuthMiddleware())
+  app.use('/api/simulator/*', utaAuthMiddleware())
+
   app.route('/api/trading', createTradingRoutes(tradingCtx))
   // Simulator endpoints — MockBroker-only god-view operations the
   // /dev/simulator UI tab drives. Lives next to the trading routes
@@ -180,12 +199,13 @@ export async function startUTAService(): Promise<void> {
 
   // ==================== Bind + shutdown ====================
 
+  const bindHost = resolveUtaBindHost()
   const server = serve({
     fetch: app.fetch,
     port: UTA_PORT,
-    hostname: '127.0.0.1',
+    hostname: bindHost,
   })
-  console.log(`[uta] listening on http://127.0.0.1:${UTA_PORT}`)
+  console.log(`[uta] listening on http://${bindHost}:${UTA_PORT}`)
 
   let stopping = false
   const shutdown = async (signal: string): Promise<void> => {

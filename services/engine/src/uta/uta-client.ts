@@ -3,10 +3,13 @@
  * §7: "src/uta/ # cliente UTA tipado (usa UTAClient + token)").
  *
  * Fase 2 scope: read-only historical bars only (POST /uta/:id/historical).
- * No auth token is sent yet — UTA has none to check (Fase 0 finding 3;
- * ADR-0003 designs the token/scopes contract but defers implementation).
- * When M7/M8 land, this client gains an `Authorization: Bearer` header
- * without changing its public shape.
+ *
+ * Fase 4b (M7/M8, ADR-0003): sends `Authorization: Bearer <token>` when
+ * `token` is configured. Per ADR-0003's scope table, the Engine's own
+ * token is expected to carry `read` (this route resolves to `read`, not
+ * `engine` — see services/uta/src/http/auth.ts's SCOPE_RULES) plus
+ * `engine` as an identity label; the Engine never carries `approve` or
+ * `operator` (it never executes directly — ADR-0006, PROMPT_MASTER §12).
  */
 
 import type { Bar, BarParams } from '@traderalice/uta-protocol'
@@ -16,6 +19,8 @@ export interface EngineUtaClientOptions {
   baseUrl: string
   /** Injectable for hermetic tests; defaults to the global fetch. */
   fetchImpl?: typeof fetch
+  /** Bearer token — omit when UTA runs in compatibility mode. */
+  token?: string
 }
 
 export interface HistoricalBarsRequest {
@@ -35,9 +40,11 @@ export class EngineUtaClient {
   async getHistoricalBars(req: HistoricalBarsRequest): Promise<Bar[]> {
     const fetchImpl = this.options.fetchImpl ?? fetch
     const url = `${this.options.baseUrl}/api/trading/uta/${encodeURIComponent(req.utaId)}/historical`
+    const headers: Record<string, string> = { 'content-type': 'application/json' }
+    if (this.options.token) headers['authorization'] = `Bearer ${this.options.token}`
     const res = await fetchImpl(url, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers,
       body: JSON.stringify({ contract: req.contract, params: req.params }),
     })
     if (!res.ok) {

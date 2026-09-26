@@ -261,11 +261,13 @@ export class WebPlugin implements Plugin {
     const utaProxy = createTradingProxyRoutes({
       utaBaseUrl: resolveUTAUrl(),
       getPolicy: ctx.tradingModePolicy,
+      utaToken: process.env['OPENALICE_UTA_TOKEN'],
     })
     app.route('/api/trading', utaProxy)
     app.route('/api/simulator', createTradingProxyRoutes({
       utaBaseUrl: resolveUTAUrl(),
       getPolicy: ctx.tradingModePolicy,
+      utaToken: process.env['OPENALICE_UTA_TOKEN'],
     }))
     app.route('/api/tools', createToolsRoutes(ctx.toolCenter))
     app.route('/api/agent-status', createAgentStatusRoutes(ctx))

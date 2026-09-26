@@ -1,0 +1,151 @@
+# UTA Auth (bearer tokens + scopes)
+
+This guide owns UTA's bearer-token authentication layer — the tokens
+file, the scope-gated HTTP middleware, `OPENALICE_UTA_BIND_HOST`, and the
+deployment-safety contract that keeps a non-loopback bind from silently
+running unauthenticated.
+
+Related guides: [[docs/project-structure.md]] (UTA's role as the sole
+trading-write chokepoint) and [[docs/risk-engine.md]] (the R0–R20 risk
+gate this auth layer sits in front of — a separate concern: auth answers
+"who is calling," the risk gate answers "should this specific order be
+allowed").
+
+## Status
+
+**[PROPUESTA] — implemented behind a compatibility fallback, not yet
+mandatory.** This guide documents Fase 4b of the trading-engine work
+(`docs/adr/0003-uta-token-auth.md`, `docs/trading-engine/`). ADR-0003
+designed this mechanism in Fase 1; this phase implements M7 (server-side
+tokens/scopes) and M8 (client-side `Authorization: Bearer`) exactly as
+designed, with one deliberate deviation noted below.
+
+## What it is
+
+Every request under `/api/trading/*` and `/api/simulator/*` passes
+through `utaAuthMiddleware()` (`services/uta/src/http/auth.ts`) before
+reaching the route handlers. `/__uta/health` is mounted before the
+middleware and stays public — Guardian's readiness probe and Alice's BFF
+health check must not need a token.
+
+```text
+Hono app
+  -> GET /__uta/health                         (always public)
+  -> /api/trading/*, /api/simulator/*
+       -> utaAuthMiddleware()  [services/uta/src/http/auth.ts]
+            -> compatibility mode: pass through unchanged
+            -> enforced mode: Bearer token -> scope check -> 401/403/next
+       -> createTradingRoutes() / createSimulatorRoutes()
+```
+
+Source: `services/uta/src/domain/trading/auth/`, `services/uta/src/http/auth.ts`.
+
+## The tokens file
+
+`OPENALICE_UTA_TOKENS_FILE` — host-owned, read-only JSON, 0600, never in
+git (same convention as `sealing.key` and the risk policy file):
+
+```json
+{
+  "version": 1,
+  "tokens": [
+    { "token": "<random ≥32 bytes, base64url>", "scopes": ["read", "stage", "approve"], "label": "alice" },
+    { "token": "<random ≥32 bytes, base64url>", "scopes": ["read"], "label": "engine-service" },
+    { "token": "<random ≥32 bytes, base64url>", "scopes": ["read", "stage", "approve", "operator"], "label": "operator-cli" }
+  ]
+}
+```
+
+Scopes are fixed: `read`, `stage`, `approve`, `engine`, `operator`,
+`simulator` (`services/uta/src/domain/trading/auth/types.ts`). A token
+can carry several — composition, not hierarchy (`operator` does not
+imply `simulator`, for example), so least privilege stays explicit per
+token. `engine` itself gates no route directly; it is an identity label
+ADR-0003 reserves for the Engine's token (which otherwise needs only
+`read`, since Fase 4b's only wired Engine route — historical bars — is a
+`read`-scoped route; the Engine never carries `approve` or `operator`
+because it never executes directly, per ADR-0006).
+
+Loading never throws: a missing file, invalid JSON, or a schema
+violation all resolve to the middleware returning 503 rather than
+crashing the process or silently allowing every request through.
+
+**Deviation from ADR-0003:** the ADR anticipated an in-memory cache
+reloaded on SIGHUP. No SIGHUP-reload mechanism exists anywhere else in
+this codebase — `risk/policy.ts` established the real precedent instead
+(re-read the file fresh on every use, no cache). This implementation
+follows that same precedent: the tokens file is re-read on every
+request. Trade-off: one small `readFile` per request (negligible next to
+a broker round-trip) in exchange for instant token revocation by editing
+the file, with no reload mechanism to build or keep correct.
+
+## Scope → route mapping
+
+`services/uta/src/http/auth.ts`'s `requiredScope()` computes the
+required scope from method + path — no route handler carries auth logic
+itself. Falls back to `operator` for anything unmatched, so a new route
+defaults to the most privileged scope until someone deliberately loosens
+it.
+
+| Scope | Routes |
+|---|---|
+| `read` | Every `GET` under `/api/trading/*`, plus the read-only `POST` routes that just happen to carry a JSON body (`quote`, `historical`, `contracts/details`, `contract/option-*`, `contract/order-book`, `contract/expand`) |
+| `stage` | `POST .../wallet/stage-place-order`, `stage-modify-order`, `stage-close-position`, `stage-cancel-order`, `commit`, `reject` |
+| `approve` | `POST .../wallet/push`, `place-order`, `close-position`, `cancel-order` (the one-shot stage→commit→push routes) |
+| `operator` | Everything else under `/api/trading/*` not covered above (`reconnect`, `sync`, `simulate-price`, `test-connection`, `DELETE .../snapshots/:timestamp`) — the conservative default |
+| `simulator` | Every route under `/api/simulator/*` |
+
+## `OPENALICE_UTA_BIND_HOST`
+
+Default `127.0.0.1`. `services/uta/src/domain/trading/auth/deployment-safety.ts`'s
+`checkUtaAuthDeploymentSafety()` runs at boot (`main.ts`, alongside the
+RiskEngine's own gate): a non-loopback bind with no tokens file
+configured refuses to start — UTA is the sole trading-write chokepoint,
+so exposing it off-loopback with no way to authenticate callers is a
+structural hole, not a disabled feature. On loopback with no tokens file
+configured, UTA still starts (today's behavior, unchanged) but logs an
+explicit "compatibility mode" warning on every start.
+
+## Client side (M8)
+
+`Authorization: Bearer <token>` is attached wherever UTA is called, only
+when a token is actually configured — omitted entirely in compatibility
+mode (UTA ignores the header either way, so this is safe regardless):
+
+- `packages/uta-protocol/src/client/UTAClient.ts` — `UTAClientOptions.token`.
+  Alice's `src/main.ts` passes `process.env.OPENALICE_UTA_TOKEN` here;
+  this is the single credential the AI tool layer, the trading-config UI
+  routes, and Telegram's trading approvals all share, since they all go
+  through this one client instance.
+- `src/webui/routes/trading-proxy.ts` — the browser-facing BFF proxy does
+  a raw `fetch()`, not `UTAClient`, so it separately attaches the same
+  `OPENALICE_UTA_TOKEN` (wired in `src/webui/plugin.ts`) as its own
+  outbound header. It never forwards the *incoming* request's own
+  `Authorization` header — the browser authenticates to Alice via session
+  cookie (`src/webui/middleware/auth.ts`), a completely separate boundary
+  from Alice's own service identity toward UTA.
+- `services/engine/src/uta/uta-client.ts` — `EngineUtaClientOptions.token`,
+  for the Engine's own credential once its runtime wires one in.
+
+## Verification
+
+```bash
+cd services/uta && pnpm typecheck && pnpm test
+pnpm test:owner:uta         # flag off (no OPENALICE_UTA_TOKENS_FILE): identical to compatibility-mode baseline
+pnpm test:integration:uta   # same
+```
+
+The dedicated suite lives in `services/uta/src/domain/trading/auth/*.spec.ts`
+and `services/uta/src/http/auth.spec.ts` — each test configures its own
+tokens file rather than relying on ambient environment state, so it
+passes regardless of whether auth is enforced in the real deployment.
+
+## Change Routing
+
+| Change | Owner path |
+|---|---|
+| A new route's required scope | `services/uta/src/http/auth.ts`'s `SCOPE_RULES` + `auth.spec.ts` |
+| Tokens file schema / scopes | `domain/trading/auth/types.ts` + ADR-0003 if the shape changes meaningfully |
+| Bind-host / deployment-safety gate | `domain/trading/auth/deployment-safety.ts` + this guide's "bind host" section |
+| Client-side header wiring | `packages/uta-protocol/src/client/UTAClient.ts`, `src/webui/routes/trading-proxy.ts`, `services/engine/src/uta/uta-client.ts` |
+| The risk gate this sits in front of | [[docs/risk-engine.md]] — a separate concern |

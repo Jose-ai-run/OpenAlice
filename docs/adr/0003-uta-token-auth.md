@@ -156,3 +156,20 @@ ya usa el modo compatibilidad: sin `OPENALICE_UTA_TOKENS_FILE`, el
 comportamiento es idéntico al actual. Revertir a "sin auth" en cualquier
 momento es simplemente no configurar (o borrar) esa variable de entorno —
 no hay migración de datos ni cambio de formato persistido involucrado.
+
+## Implementación (Fase 4b, 2026-09-26)
+
+Implementado tal como se diseñó arriba — ver [[docs/uta-auth.md]] para el
+detalle operativo y `docs/trading-engine/AUDIT.md` §10 para la salida de
+verificación real. Una desviación deliberada respecto al diseño original:
+
+- **Recarga del archivo de tokens:** este ADR anticipaba una caché en
+  memoria con recarga por `SIGHUP`. Ningún mecanismo de recarga por señal
+  existe en el resto del repositorio — `risk/policy.ts` (ADR-0004)
+  estableció el precedente real (releer el archivo en cada uso, sin
+  caché). La implementación de M7 sigue ese mismo precedente: el archivo
+  de tokens se relee en cada request. Esto sacrifica un `readFile`
+  adicional por request (insignificante frente a un round-trip al
+  broker) a cambio de revocación instantánea de un token editando el
+  archivo, sin necesidad de construir ni mantener correcto un mecanismo
+  de recarga por señal.

@@ -2,9 +2,11 @@
  * BFF proxy for `/api/trading/*` — Alice → UTA.
  *
  * UI talks to Alice on a single origin (decision #2 of UTA-split v1); this
- * route forwards every trading request unchanged to the UTA service. v1
- * has no auth between the two — UTA is bound to 127.0.0.1 only, so the
- * trust boundary is the host, not the request.
+ * route forwards every trading request to the UTA service. Fase 4b
+ * (ADR-0003) adds a bearer token Alice attaches on every forwarded
+ * request when `OPENALICE_UTA_TOKEN` is configured; in compatibility mode
+ * (UTA has no `OPENALICE_UTA_TOKENS_FILE`) the trust boundary is still
+ * the host — UTA bound to loopback only.
  *
  * Stream-friendly: forwards request body, returns UTA's Response as-is so
  * `Content-Type` / chunked transfer / SSE headers pass through. A short
@@ -37,9 +39,17 @@ export function createTradingProxyRoutes(opts: {
   utaBaseUrl?: string
   disabledReason?: 'lite_mode'
   getPolicy?: () => TradingModePolicy
+  /** [PROPUESTA] Fase 4b (M8, ADR-0003) — Alice's own service token,
+   *  forwarded as `Authorization: Bearer <token>` on every proxied
+   *  request. This is Alice's identity toward UTA, not the browser's —
+   *  the incoming request's own Authorization header (if any) is never
+   *  forwarded; the UI authenticates to Alice via session cookie
+   *  (src/webui/middleware/auth.ts), a separate boundary. */
+  utaToken?: string
 }): Hono {
   const app = new Hono()
   const base = opts.utaBaseUrl?.replace(/\/$/, '')
+  const utaToken = opts.utaToken
   const disabledReason = opts.disabledReason
   const getPolicy = opts.getPolicy ?? (() => ({
     mode: disabledReason === 'lite_mode' ? 'lite' : 'pro',
@@ -146,6 +156,7 @@ export function createTradingProxyRoutes(opts: {
       const v = incoming.headers.get(name)
       if (v !== null) forwardHeaders.set(name, v)
     }
+    if (utaToken) forwardHeaders.set('authorization', `Bearer ${utaToken}`)
 
     const controller = new AbortController()
     const connectTimer = setTimeout(() => controller.abort(), PROXY_TIMEOUT_MS)

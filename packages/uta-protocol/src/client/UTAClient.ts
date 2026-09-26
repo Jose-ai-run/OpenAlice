@@ -17,6 +17,14 @@ export interface UTAClientOptions {
   fetch?: typeof globalThis.fetch
   /** Request timeout in ms. Default 15s. */
   timeoutMs?: number
+  /**
+   * [PROPUESTA] Fase 4b (M8, ADR-0003) — bearer token sent as
+   * `Authorization: Bearer <token>` on every request. Omit when UTA is
+   * running in compatibility mode (no `OPENALICE_UTA_TOKENS_FILE`); UTA
+   * ignores the header entirely in that mode, so leaving it unset is safe
+   * either way.
+   */
+  token?: string
 }
 
 export interface UTAClient {
@@ -49,6 +57,7 @@ export function createUTAClient(options: UTAClientOptions): UTAClient {
   const baseUrl = options.baseUrl.replace(/\/$/, '')
   const fetchImpl = options.fetch ?? globalThis.fetch
   const timeoutMs = options.timeoutMs ?? 15_000
+  const token = options.token
 
   function buildUrl(path: string, params?: Record<string, string | number | undefined>): string {
     const url = new URL(`${baseUrl}${path.startsWith('/') ? path : `/${path}`}`)
@@ -65,9 +74,11 @@ export function createUTAClient(options: UTAClientOptions): UTAClient {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeoutMs)
     const signal = opts.signal ?? controller.signal
+    const headers: Record<string, string> = { 'content-type': 'application/json' }
+    if (token) headers['authorization'] = `Bearer ${token}`
     const init: RequestInit = {
       method,
-      headers: { 'content-type': 'application/json' },
+      headers,
       signal,
     }
     if (opts.body !== undefined) init.body = JSON.stringify(opts.body)

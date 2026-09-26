@@ -64,6 +64,28 @@ describe('createTradingProxyRoutes — UTA optional carrier', () => {
     expect(res.status).toBe(200)
   })
 
+  it('attaches the configured Alice service token as Authorization: Bearer', async () => {
+    let seenAuth: string | null = null
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+      seenAuth = new Headers(init?.headers).get('authorization')
+      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'content-type': 'application/json' } })
+    }))
+    const app = createTradingProxyRoutes({ utaBaseUrl: 'http://127.0.0.1:47333', utaToken: 'alice-service-token' })
+    await app.request('/uta')
+    expect(seenAuth).toBe('Bearer alice-service-token')
+  })
+
+  it('never forwards the incoming caller Authorization header — only Alice\'s own token', async () => {
+    let seenAuth: string | null = null
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+      seenAuth = new Headers(init?.headers).get('authorization')
+      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'content-type': 'application/json' } })
+    }))
+    const app = createTradingProxyRoutes({ utaBaseUrl: 'http://127.0.0.1:47333' })
+    await app.request('/uta', { headers: { authorization: 'Bearer whatever-the-caller-sent' } })
+    expect(seenAuth).toBeNull()
+  })
+
   it('reports unavailable status when no carrier URL is configured', async () => {
     const app = createTradingProxyRoutes({})
     const res = await app.request('/status')

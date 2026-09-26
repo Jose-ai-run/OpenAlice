@@ -781,6 +781,84 @@ pnpm test:integration:uta            # 1/1, 15/15 (sin cambios)
 
 ---
 
+## 10. Fase 4b — UTA Auth (`feat/engine-f4b-uta-auth`) — 2026-09-26
+
+M7 (tokens con scopes en el servidor) y M8 (`Authorization: Bearer` en
+cada cliente) implementados tal como ADR-0003 los diseñó, con una
+desviación deliberada (recarga sin caché en vez de recarga por SIGHUP —
+ver la sección "Implementación" añadida a `docs/adr/0003-uta-token-auth.md`).
+Detalle operativo completo en [[docs/uta-auth.md]] (nueva guía, registrada
+en `docs/README.md`).
+
+### 10.1 Qué se construyó
+
+- `services/uta/src/domain/trading/auth/types.ts` — scopes fijos
+  (`read`, `stage`, `approve`, `engine`, `operator`, `simulator`) y el
+  esquema Zod del archivo de tokens.
+- `services/uta/src/domain/trading/auth/tokens-file.ts` — `loadUtaTokens()`
+  (nunca lanza, igual que `loadRiskPolicy`) y `findToken()` (comparación
+  en tiempo constante vía `timingSafeEqual`, mismo cuidado que
+  `src/services/auth/token-store.ts`).
+- `services/uta/src/domain/trading/auth/deployment-safety.ts` —
+  `checkUtaAuthDeploymentSafety()`: bind no-loopback sin archivo de
+  tokens → rechaza arrancar; loopback sin archivo → arranca en modo
+  compatibilidad con warning explícito en cada arranque.
+- `services/uta/src/http/auth.ts` — `utaAuthMiddleware()` +
+  `requiredScope()`: tabla ruta→scope centralizada (ningún route handler
+  de `routes-trading.ts`/`routes-simulator.ts` se tocó). Sin token → 401.
+  Token válido sin el scope requerido → 403. Fallback conservador:
+  cualquier ruta no mapeada explícitamente exige `operator`.
+- `services/uta/src/main.ts` — gate de deployment-safety al arranque
+  (junto al de RiskEngine), `OPENALICE_UTA_BIND_HOST` reemplaza el
+  `127.0.0.1` fijo, middleware montado en `/api/trading/*` y
+  `/api/simulator/*` (no en `/__uta/health`, que sigue público).
+- Cliente (M8): `packages/uta-protocol/src/client/UTAClient.ts`
+  (`token` opcional → header `Authorization`), `src/main.ts` de Alice
+  (lee `OPENALICE_UTA_TOKEN`), `src/webui/routes/trading-proxy.ts` +
+  `src/webui/plugin.ts` (el proxy BFF adjunta el mismo token de Alice,
+  **nunca** reenvía el `Authorization` que trajo el navegador — ese es un
+  boundary completamente distinto, la cookie de sesión de
+  `src/webui/middleware/auth.ts`), `services/engine/src/uta/uta-client.ts`
+  (`token` opcional, listo para cuando el runtime del Engine exista).
+
+### 10.2 Resultados reales
+
+```
+cd services/uta && pnpm typecheck                        # limpio
+cd packages/ibkr && pnpm build                            # limpio (dependencia de uta-protocol; no construible standalone sin esto — condición preexistente, no de esta fase)
+cd packages/uta-protocol && pnpm build                     # limpio
+cd services/uta && pnpm build                              # limpio (dist/uta.js 339.51 KB, antes 333.97 KB)
+npx tsc --noEmit (raíz, cubre src/)                        # limpio
+corepack pnpm exec tsup src/main.ts --format esm --dts     # limpio (warning preexistente y no relacionado: direct-eval en calculate.tool.ts)
+cd services/engine && pnpm typecheck                       # limpio (warning informativo: node actual v24.12.0 < engines.node >=24.15.0 declarado — ver ADR-0002, pendiente de confirmación del usuario)
+cd services/engine && pnpm test                            # 19/19 archivos, 83/83 tests
+pnpm test:owner:uta                                        # 69/69 archivos, 1178/1178 tests (flag off — línea base + tests nuevos de auth)
+pnpm test:integration:uta                                  # 1/1, 15/15 (sin cambios)
+npx vitest run src/webui/routes/trading-proxy.spec.ts       # 1/1, 14/14 (12 preexistentes + 2 nuevos)
+node scripts/run-tests.mjs --package @traderalice/uta-protocol  # 2/2, 4/4
+```
+
+`npx vitest run src/webui` corre 34 archivos; 3 fallan (`workspace-content`
+symlink test y dos aserciones de ruta con separador Windows en
+`workspaces.spec.ts`) — **preexistentes, sin relación** con `trading-proxy.ts`
+ni con esta fase (ningún archivo tocado en Fase 4b aparece en esos tests).
+
+### 10.3 Hallazgo preexistente confirmado (no de esta fase)
+
+`packages/uta-protocol` y `packages/ibkr` no se pueden `tsc --noEmit` /
+`pnpm build` de forma standalone dentro de su propio directorio — ambos
+fallan con `Cannot find module '@traderalice/ibkr'` hasta que
+`packages/ibkr` se construye primero (o se corre vía el orquestador
+`turbo`/`scripts/run-tests.mjs`, que sí resuelve el workspace
+correctamente). Confirmado que preexiste (mismo error con
+`git stash` aplicado, antes de cualquier cambio de esta fase). `npx turbo
+run build` también falló en este entorno concreto (`Unable to find
+package manager binary`) — build hecho paquete-por-paquete en su lugar
+para verificar; no se investigó más a fondo por no ser parte del alcance
+de esta fase.
+
+---
+
 ## Resumen de la línea de tiempo de esta sesión
 
 - Herramientas verificadas: git 2.49.0, Node v24.12.0, pnpm 11.7.0 (vía `corepack pnpm`).

@@ -41,6 +41,7 @@ GitHub navigation.
 | [[docs/event-system.md]] | [Event-system retirement note](event-system.md) | Removed Alice event-bus scheduler and the remaining UTA journal boundary |
 | [[docs/uta-live-testing.md]] | [UTA live testing](uta-live-testing.md) | Real broker/demo acceptance scenarios and trading invariants |
 | [[docs/risk-engine.md]] | [Risk Engine](risk-engine.md) | R0–R20 deterministic risk gate, kill switch, deployment-safety flag contract |
+| [[docs/uta-auth.md]] | [UTA Auth](uta-auth.md) | Bearer tokens, scopes, `OPENALICE_UTA_BIND_HOST`, deployment-safety, client-side wiring |
 | [[docs/ibkr-wire-protocol.md]] | [IBKR wire protocol](ibkr-wire-protocol.md) | TWS/Gateway inbound framing, payload-only decoder contract, failure isolation, and verification |
 | [[docs/market-data-architecture.md]] | [Market data architecture](market-data-architecture.md) | TraderHub/reference data, BarService K-lines, and the private provider compatibility layer |
 
