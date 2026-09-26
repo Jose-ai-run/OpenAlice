@@ -1,6 +1,0 @@
-# Placeholder — no code here yet.
-#
-# Fase 3 — PositionSizer.
-#
-# Fase 1 (this commit) only establishes the folder layout from
-# PROMPT_MASTER_CLAUDE_CODE.md §7 plus ADRs; it contains zero business logic.
