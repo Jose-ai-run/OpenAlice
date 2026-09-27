@@ -9,18 +9,15 @@ le va — el hallazgo que motiva por qué toda mejora que le daría al LLM
 más autoridad de decisión queda rechazada o congelada, y solo se
 adoptan mejoras de medición y seguridad del núcleo determinístico.
 
-Origen: `docs/trading-engine/MEJORAS_DESDE_PHIL.md` (referencia externa,
-sin modificar). **Nota:** ese archivo no se pudo copiar en esta ronda —
-no se encontró en `C:\AliceTrader\MEJORAS_DESDE_PHIL.md` ni en ninguna
-ruta accesible. El registro de abajo se construyó directamente a partir
-de la especificación inline que el usuario proporcionó en el prompt de
-aprobación de la Fase 4b (2026-09-27), que es completa y autocontenida
-para cada ID. Pendiente: el usuario confirma la ruta correcta del
-archivo o lo adjunta de nuevo para completar la copia literal.
+Origen: [[docs/trading-engine/MEJORAS_DESDE_PHIL.md]] (referencia
+externa, copiada sin modificar el 2026-09-27 — el registro de abajo se
+construyó originalmente a partir de la especificación inline del
+prompt de aprobación de la Fase 4b, y se verificó consistente con el
+documento fuente una vez apareció).
 
-Donde este backlog difiera en alcance de `MEJORAS_DESDE_PHIL.md` (una
-vez copiado), **manda el prompt de aprobación de la Fase 4b**, no el
-documento de Phil — así lo estableció el usuario explícitamente.
+Donde este backlog difiera en alcance de `MEJORAS_DESDE_PHIL.md`,
+**manda el prompt de aprobación de la Fase 4b**, no el documento de
+Phil — así lo estableció el usuario explícitamente.
 
 ## Cómo leer esta tabla
 
