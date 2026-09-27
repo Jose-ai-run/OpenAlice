@@ -37,7 +37,13 @@ import { createTradingRoutes } from './http/routes-trading.js'
 import { createSimulatorRoutes } from './http/routes-simulator.js'
 import { utaAuthMiddleware } from './http/auth.js'
 import { checkRiskEngineDeploymentSafety } from './domain/trading/risk/deployment-safety.js'
-import { checkUtaAuthDeploymentSafety, resolveUtaBindHost } from './domain/trading/auth/deployment-safety.js'
+import {
+  checkUtaAuthDeploymentSafety,
+  checkTokensFileDevLocation,
+  resolveUtaBindHost,
+} from './domain/trading/auth/deployment-safety.js'
+import { resolveUtaTokensFilePath } from './domain/trading/auth/tokens-file.js'
+import { userDataHome } from '@/core/paths.js'
 import type { UTAEngineContext } from './types.js'
 
 const UTA_PORT = Number(process.env['OPENALICE_UTA_PORT'] ?? 47333)
@@ -66,6 +72,17 @@ export async function startUTAService(): Promise<void> {
     process.exit(1)
   }
   if (authSafety.warn) console.warn(authSafety.warn)
+
+  // [PROPUESTA] Fase 4b corrección A.1 — resolved exactly ONCE, here, at
+  // boot. `utaAuthMiddleware` receives this fixed value and never
+  // re-reads the env var itself: a later read failure must deny every
+  // request, never silently fall back to compatibility mode. See
+  // http/auth.ts's module docstring.
+  const utaTokensPath = resolveUtaTokensFilePath()
+  if (utaTokensPath) {
+    const locationWarning = checkTokensFileDevLocation(utaTokensPath, userDataHome)
+    if (locationWarning) console.warn(locationWarning)
+  }
 
   // Surface outbound-proxy config at startup so a user behind a proxy can
   // confirm UTA saw it — CCXT exchange instances are bridged onto it per
@@ -187,8 +204,8 @@ export async function startUTAService(): Promise<void> {
   }
   // [PROPUESTA] Fase 4b — bearer-token auth (M7). No-op in compatibility
   // mode (no OPENALICE_UTA_TOKENS_FILE); see http/auth.ts.
-  app.use('/api/trading/*', utaAuthMiddleware())
-  app.use('/api/simulator/*', utaAuthMiddleware())
+  app.use('/api/trading/*', utaAuthMiddleware(utaTokensPath))
+  app.use('/api/simulator/*', utaAuthMiddleware(utaTokensPath))
 
   app.route('/api/trading', createTradingRoutes(tradingCtx))
   // Simulator endpoints — MockBroker-only god-view operations the

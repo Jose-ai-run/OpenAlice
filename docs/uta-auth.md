@@ -79,6 +79,39 @@ request. Trade-off: one small `readFile` per request (negligible next to
 a broker round-trip) in exchange for instant token revocation by editing
 the file, with no reload mechanism to build or keep correct.
 
+**Enforced-vs-compatibility is decided ONCE, at boot (correction A.1,
+2026-09-27).** `main.ts` resolves `OPENALICE_UTA_TOKENS_FILE` exactly
+once at startup and passes that fixed path into `utaAuthMiddleware()` as
+a closure value — the middleware never re-reads the env var per
+request. This matters specifically because the file itself is still
+re-read fresh on every request (previous paragraph): if UTA started in
+enforced mode and a *later* read fails — the file got deleted, a write
+left it truncated mid-flight, an operator emptied it by mistake — every
+request is denied (401/503) with a logged `console.error` alert. It is
+never reinterpreted as "auth was never configured" and silently
+downgraded to compatibility mode. Only an actual process restart with
+the env var unset produces compatibility mode. Verified directly:
+`services/uta/src/http/auth.spec.ts`'s "never falls back to
+compatibility mode" suite starts an app with a valid tokens file,
+deletes/corrupts/empties it mid-run, confirms every request is denied
+in each case, then restores valid content and confirms it recovers.
+
+**Production: mount the tokens file read-only.** Whoever can write this
+file can grant themselves `operator` (or any other scope) instantly —
+the file's authorization is exactly as strong as its write permission.
+Fase 10's deployment mounts it as a Docker secret or a `:ro` bind,
+outside any tree the running process (or an agent it might be
+compromised into running) can write to. In local development,
+`checkTokensFileDevLocation()` (`domain/trading/auth/deployment-safety.ts`)
+logs an explicit `console.warn` at boot if the configured path resolves
+inside `OPENALICE_HOME` — and a sharper one if it resolves inside a
+Workspace specifically, since a Workspace is exactly the untrusted-local-
+code surface this token is meant to gate. This is advisory only (pure
+path comparison, no filesystem access, so it still runs even if the file
+doesn't exist yet) — it does not block startup the way the bind-host
+gate does, because a dev machine legitimately has no other convenient
+place to put it.
+
 ## Scope → route mapping
 
 `services/uta/src/http/auth.ts`'s `requiredScope()` computes the
@@ -94,6 +127,19 @@ it.
 | `approve` | `POST .../wallet/push`, `place-order`, `close-position`, `cancel-order` (the one-shot stage→commit→push routes) |
 | `operator` | Everything else under `/api/trading/*` not covered above (`reconnect`, `sync`, `simulate-price`, `test-connection`, `DELETE .../snapshots/:timestamp`) — the conservative default |
 | `simulator` | Every route under `/api/simulator/*` |
+
+**Default-deny audit (correction A.2, 2026-09-27):**
+`services/uta/src/http/route-scope-audit.spec.ts` enumerates every route
+Hono's own `app.routes` reports for `createTradingRoutes()` and
+`createSimulatorRoutes()` — not a hand-maintained list that can drift
+from the real app — and checks each one against an explicit expectation
+table. A route the table doesn't know about fails the test, forcing a
+deliberate scope decision before it can ship silently on the `operator`
+fallback. A write-verb route (non-`GET`/`HEAD`) that resolves to `read`
+fails unless it's on the explicit allowlist above (the seven pure
+market-data/account reads that happen to carry a JSON body) — this is
+the check that catches a future route accidentally under-protected by a
+too-broad regex in `SCOPE_RULES`.
 
 ## `OPENALICE_UTA_BIND_HOST`
 

@@ -857,6 +857,133 @@ package manager binary`) — build hecho paquete-por-paquete en su lugar
 para verificar; no se investigó más a fondo por no ser parte del alcance
 de esta fase.
 
+**Nota para los Dockerfiles de la Fase 10:** esto no es un bug a
+arreglar en Fase 4b — es la topología normal de un monorepo con
+project references (`packages/ibkr` → `packages/uta-protocol` →
+`services/uta`/`services/engine`). El Dockerfile de cada servicio debe
+invocar el build a través de `turbo run build --filter=<paquete>...`
+(el `...` de Turborepo incluye las dependencias del paquete, ya
+declaradas en cada `package.json` — `^build` en la definición de la
+tarea en `turbo.json` es lo que ya fuerza ese orden) en vez de llamar a
+`tsc`/`tsup` directamente dentro del directorio de un solo paquete. La
+falla de `npx turbo run build` en este entorno concreto (`Unable to find
+package manager binary`) es una particularidad de este checkout/entorno
+Windows — no se investigó a fondo por no ser parte del alcance de esta
+fase, pero Fase 10 debe confirmar que el orquestador real (`turbo` vía
+`corepack pnpm exec turbo`, o el CI del proyecto) sí resuelve el
+workspace correctamente antes de asumir que el Dockerfile funcionará.
+
+---
+
+## 11. Fase 4b aprobada CON CORRECCIONES — Parte A (2026-09-27)
+
+### 11.1 A.1 — Tokens fail-closed, decidido una sola vez al arrancar
+
+`services/uta/src/http/auth.ts`: `utaAuthMiddleware()` ahora recibe el
+path resuelto de `OPENALICE_UTA_TOKENS_FILE` como argumento fijo
+(resuelto una única vez en `main.ts` al arrancar), en vez de releer la
+variable de entorno en cada request. El archivo en sí se sigue
+releyendo en cada request (mismo precedente que `risk/policy.ts`, sin
+caché), pero el propio *modo* (compatibilidad vs. forzado) queda fijado
+para toda la vida del proceso. Cualquier fallo de lectura posterior
+(archivo borrado, vacío, JSON corrupto, escritura a medias) ahora
+deniega TODO (401/403 según corresponda, 503 si el archivo no carga) y
+registra una alerta (`console.error`), sin jamás caer de vuelta al modo
+compatibilidad. Añadido `checkTokensFileDevLocation()`
+(`domain/trading/auth/deployment-safety.ts`): warning explícito al
+arrancar si el archivo de tokens configurado vive dentro de
+`OPENALICE_HOME` (peor aún, dentro de un Workspace). Documentado en
+`docs/uta-auth.md` que en producción el archivo va montado en solo
+lectura (Docker secret o bind `:ro`).
+
+Salida real (`services/uta/src/http/auth.spec.ts`, suite nueva
+"Fase 4b corrección A.1: never falls back to compatibility mode"):
+
+```
+✓ a valid token works, then deleting the file mid-run denies everything (401/503), never a silent pass-through
+✓ a corrupted file (truncated JSON) denies everything, then restoring valid content recovers
+✓ an empty file (zero bytes) denies everything — not valid JSON, not "no auth configured"
+```
+
+### 11.2 A.2 — Default-deny, auditoría exhaustiva de rutas
+
+Nuevo `services/uta/src/http/route-scope-audit.spec.ts`: enumera las
+rutas reales que registran `createTradingRoutes()` (39) y
+`createSimulatorRoutes()` (9) vía `app.routes` de Hono (no una lista
+copiada a mano), las compara contra una tabla de expectativas explícita
+y falla si aparece una ruta sin decisión de scope deliberada, o si
+alguna ruta de escritura (verbo≠GET/HEAD) resuelve a `read` fuera de la
+lista blanca documentada (las 7 lecturas de mercado/cuenta que viajan
+con cuerpo JSON: `quote`, `historical`, `contracts/details`,
+`contract/option-contracts`, `contract/option-chain`,
+`contract/order-book`, `contract/expand`).
+
+Salida real:
+
+```
+Test Files  70 passed (70)
+     Tests  1229 passed (1229)
+```
+
+(línea base previa a A.1/A.2: 69 archivos, 1178 tests — el delta son
+las suites nuevas `route-scope-audit.spec.ts` y las tres pruebas de
+"never falls back" de A.1, más las de `checkTokensFileDevLocation`).
+
+`pnpm test:integration:uta` — sin cambios: 1/1, 15/15.
+`cd services/uta && pnpm build` — limpio, `dist/uta.js` 341.04 KB.
+
+### 11.3 A.3 — Confirmación real de los 3 ajustes de la Fase 4a
+
+Salida real, re-ejecutada hoy, de los tres puntos que la aprobación
+pidió confirmar explícitamente (no solo "está documentado" — la salida
+de abajo es de una ejecución fresca de esta sesión):
+
+**Trampas de lookahead realistas + test del constructor de contexto**
+(`services/engine/src/strategies/context-builder.spec.ts` +
+`services/engine/test/property/lookahead-trap.spec.ts`, 14/14):
+
+```
+✓ buildStrategyContext — THE real no-lookahead guarantee > never includes bars timestamped after asOf, even when the raw dataset contains them
+✓ buildStrategyContext — THE real no-lookahead guarantee > excludes the trailing bar specifically when it has not closed by asOf, independent of future bars
+✓ buildStrategyContext — THE real no-lookahead guarantee > includes every closed bar up to and including one that closes exactly at asOf
+✓ Trap (a) — a real strategy fed leaked future bars decides differently than through the builder > momentum sees a future price spike if the caller bypasses buildStrategyContext, but never if it goes through it
+✓ Trap (b) — a real strategy fed an unclosed "open candle" as if it were final > momentum reacts to a still-forming candle when bypassing the builder, never when going through it
+✓ Trap (c) — a feature computed using bar t+1 > the buggy feature is undefined/NaN under proper truncation but "works" when future data leaks in — proving it depends on t+1
+✓ Trap (c) — a feature computed using bar t+1 > the correct feature is identical whether or not future data is present (real no-lookahead)
+✓ no-lookahead mutation test > the trap strategy DOES see the future (sanity check on the trap itself)
+✓ no-lookahead mutation test > assertNoLookahead FAILS (throws) against the trap strategy
+✓ no-lookahead mutation test > assertNoLookahead PASSES for strategy trend-following/mean-reversion/breakout/momentum (the same assertion the trap fails)
+✓ no-lookahead mutation test > assertNoLookahead PASSES for regime-switch (E) on an oscillating fixture
+
+Test Files  2 passed (2)
+     Tests  14 passed (14)
+```
+
+**Negativa a arrancar con política definida y flag apagado**
+(`services/uta/src/domain/trading/risk/deployment-safety.spec.ts`):
+
+```
+✓ checkRiskEngineDeploymentSafety > refuses to start: policy path configured but the engine flag is off
+✓ checkRiskEngineDeploymentSafety > refuses to start even if the flag is set to something other than "1" (e.g. "true")
+✓ checkRiskEngineDeploymentSafety > starts fine, no warning, when both the policy path and the flag are set correctly
+✓ checkRiskEngineDeploymentSafety > starts fine but with a visible warning when the flag is off and no policy path is set (intentional local dev)
+```
+
+**HALT_NEW si falla definitivamente la escritura del estado**
+(`services/uta/src/domain/trading/risk/risk-engine-write-failure.spec.ts`,
+con la línea real de `console.error` capturada, no resumida):
+
+```
+stderr | ... forces HALT_NEW and reports STATE_WRITE_FAILURE instead of returning the rule chain's real (allow) verdict
+[uta:risk] risk state write failed definitively: simulated definitive disk failure (as if all EPERM/EBUSY retries were exhausted) — forcing HALT_NEW for account "risk-engine-write-failure-target" (not continuing on in-memory state)
+
+✓ forces HALT_NEW and reports STATE_WRITE_FAILURE instead of returning the rule chain's real (allow) verdict
+✓ also forces HALT_NEW when the write fails on a rule REJECTION path (not just the allow path)
+✓ an unrelated account (not sabotaged) is unaffected — the mock passes through to the real implementation
+```
+
+Los tres puntos: **confirmados con salida real, sin regresiones.**
+
 ---
 
 ## Resumen de la línea de tiempo de esta sesión

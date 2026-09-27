@@ -1,18 +1,31 @@
 /**
  * [PROPUESTA] UTA bearer-token auth middleware — Fase 4b, ADR-0003, M7.
+ * Corrección 2026-09-27 (Fase 4b aprobada CON CORRECCIONES, item A.1).
  *
- * Compatibility mode (no `OPENALICE_UTA_TOKENS_FILE` configured): passes
- * every request through unchanged — identical to pre-Fase-4b behavior.
- * The loud startup warning lives in `deployment-safety.ts` (checked once
- * at boot), not here, so this middleware stays silent per-request.
+ * Compatibility mode (no `OPENALICE_UTA_TOKENS_FILE` configured at boot):
+ * passes every request through unchanged — identical to pre-Fase-4b
+ * behavior. The loud startup warning lives in `deployment-safety.ts`
+ * (checked once at boot), not here, so this middleware stays silent
+ * per-request in this mode.
+ *
+ * **The enforced/compatibility decision is made ONCE, at boot** — the
+ * caller (`main.ts`) resolves `OPENALICE_UTA_TOKENS_FILE` a single time
+ * and passes the result into `utaAuthMiddleware(tokensPath)` as a fixed
+ * closure value. This middleware never re-reads the env var per request.
+ * That matters: once UTA started in enforced mode, a *content* failure
+ * on a later read (file deleted, truncated mid-write, corrupted) must
+ * deny every request (401/503) — it must NEVER be interpreted as "the
+ * operator un-configured auth" and fall back to compatibility mode. Only
+ * an actual restart with the env var unset can do that.
  *
  * Enforced mode: every request needs `Authorization: Bearer <token>`.
  * No token or an unrecognized one → 401. Recognized but missing the
  * scope the route requires → 403. The tokens file itself failing to
- * load (missing/corrupt) fails closed — 503, never "treat as no auth".
+ * load on a given request (missing/empty/corrupt/partial write) fails
+ * closed — 503 + a logged alert, never "treat as no auth".
  */
 import type { Context, MiddlewareHandler } from 'hono'
-import { findToken, loadUtaTokens, resolveUtaTokensFilePath } from '../domain/trading/auth/tokens-file.js'
+import { findToken, loadUtaTokens } from '../domain/trading/auth/tokens-file.js'
 import type { UtaScope } from '../domain/trading/auth/types.js'
 
 /**
@@ -55,13 +68,18 @@ export interface UtaAuthInfo {
   scopes: UtaScope[]
 }
 
-export function utaAuthMiddleware(): MiddlewareHandler {
+/**
+ * @param tokensPath The path resolved from `OPENALICE_UTA_TOKENS_FILE`
+ *   AT BOOT (or `undefined` if it was unset at boot) — see the module
+ *   docstring for why this is a fixed argument, not re-read per request.
+ */
+export function utaAuthMiddleware(tokensPath: string | undefined): MiddlewareHandler {
   return async (c, next) => {
-    const tokensPath = resolveUtaTokensFilePath()
-    if (!tokensPath) return next()  // compatibility mode — see deployment-safety.ts
+    if (!tokensPath) return next()  // compatibility mode — decided once, at boot; see deployment-safety.ts
 
     const loaded = await loadUtaTokens(tokensPath)
     if (!loaded.ok) {
+      console.error(`[uta:auth] tokens file unreadable/invalid — denying ALL requests, not falling back to compatibility mode: ${loaded.reason}`)
       return c.json({ error: 'UTA auth misconfigured', detail: loaded.reason }, 503)
     }
 

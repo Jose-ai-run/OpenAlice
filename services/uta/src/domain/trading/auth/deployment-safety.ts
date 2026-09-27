@@ -11,6 +11,8 @@
  * Pure function (no I/O, no process.exit) so main.ts's startup path stays
  * a thin, testable wrapper — see main.ts's call site.
  */
+import { resolve, sep } from 'node:path'
+
 export interface DeploymentSafetyCheck {
   ok: boolean
   /** Set when ok is false — the process must not start. */
@@ -56,4 +58,42 @@ export function checkUtaAuthDeploymentSafety(env: NodeJS.ProcessEnv = process.en
   }
 
   return { ok: true }
+}
+
+/**
+ * [PROPUESTA] Fase 4b corrección A.1 (2026-09-27) — dev-time advisory.
+ *
+ * A tokens file living inside `OPENALICE_HOME` (and especially inside a
+ * Workspace, which an agent with shell access can read) sits next to
+ * exactly the kind of untrusted local code this token is meant to gate.
+ * Production deployment mounts the file read-only from outside that tree
+ * (a Docker secret or a `:ro` bind — see docs/uta-auth.md); this check
+ * only advises during local development, where that separation is easy
+ * to forget. Pure path comparison — no filesystem access, so it is safe
+ * to call even when the file doesn't exist.
+ */
+export function checkTokensFileDevLocation(tokensPath: string, userDataHome: string): string | undefined {
+  const resolvedTokens = resolve(tokensPath)
+  const resolvedHome = resolve(userDataHome)
+  const resolvedWorkspaces = resolve(userDataHome, 'workspaces')
+
+  const isUnder = (child: string, root: string): boolean => child === root || child.startsWith(root + sep)
+
+  if (isUnder(resolvedTokens, resolvedWorkspaces)) {
+    return (
+      `[uta] OPENALICE_UTA_TOKENS_FILE ("${tokensPath}") lives inside a Workspace ` +
+      `(${resolvedWorkspaces}) — any agent with shell access to that Workspace can read every ` +
+      'scope-carrying bearer token, including operator. Move it outside OPENALICE_HOME entirely; ' +
+      'production mounts it read-only from a separate location (see docs/uta-auth.md).'
+    )
+  }
+  if (isUnder(resolvedTokens, resolvedHome)) {
+    return (
+      `[uta] OPENALICE_UTA_TOKENS_FILE ("${tokensPath}") lives inside OPENALICE_HOME ` +
+      `(${resolvedHome}) — anything that can read Alice's user-data tree (backups, sync, a ` +
+      'compromised local process) can also read every bearer token. Move it outside OPENALICE_HOME; ' +
+      'production mounts it read-only from a separate location (see docs/uta-auth.md).'
+    )
+  }
+  return undefined
 }

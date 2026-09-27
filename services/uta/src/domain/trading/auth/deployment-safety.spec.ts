@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { checkUtaAuthDeploymentSafety, isLoopbackHost, resolveUtaBindHost } from './deployment-safety.js'
+import { join } from 'node:path'
+import {
+  checkTokensFileDevLocation,
+  checkUtaAuthDeploymentSafety,
+  isLoopbackHost,
+  resolveUtaBindHost,
+} from './deployment-safety.js'
 
 describe('resolveUtaBindHost', () => {
   it('defaults to 127.0.0.1 when unset', () => {
@@ -47,5 +53,28 @@ describe('checkUtaAuthDeploymentSafety', () => {
     const result = checkUtaAuthDeploymentSafety({ OPENALICE_UTA_TOKENS_FILE: '/etc/openalice/uta-tokens.json' })
     expect(result.ok).toBe(true)
     expect(result.warn).toBeUndefined()
+  })
+})
+
+describe('checkTokensFileDevLocation — Fase 4b corrección A.1', () => {
+  const home = join('home', 'user', '.openalice')
+
+  it('warns when the tokens file lives inside OPENALICE_HOME', () => {
+    const warning = checkTokensFileDevLocation(join(home, 'uta-tokens.json'), home)
+    expect(warning).toMatch(/inside OPENALICE_HOME/)
+  })
+
+  it('warns specifically about a Workspace (agent shell access) when nested that deep', () => {
+    const warning = checkTokensFileDevLocation(join(home, 'workspaces', 'ws-1', 'uta-tokens.json'), home)
+    expect(warning).toMatch(/inside a Workspace/)
+  })
+
+  it('does not warn when the tokens file lives outside OPENALICE_HOME entirely', () => {
+    const warning = checkTokensFileDevLocation(join('etc', 'openalice', 'uta-tokens.json'), home)
+    expect(warning).toBeUndefined()
+  })
+
+  it('is a pure path comparison — does not touch the filesystem (works for a path that does not exist)', () => {
+    expect(() => checkTokensFileDevLocation(join('nonexistent', 'path', 'tokens.json'), home)).not.toThrow()
   })
 })
