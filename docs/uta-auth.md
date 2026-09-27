@@ -249,6 +249,49 @@ staged — "HUMAN_APPROVAL mode" falls out of the stage-gating plus that
 existing invariant, with no second mechanism needed to track "who
 created this pendingHash."
 
+**`/cli` (workspace CLI shims) — verified acceptable, not a gap.**
+`src/server/cli.ts`'s `POST /cli/:wsId/:export/invoke` is deliberately
+unauthenticated — "no admin-token gate, the workspace CLI carries no
+secret" — because it is the *normal, intended* surface a Workspace
+agent's own shell uses (`alice`, `alice-uta`, etc.). That's fine
+precisely because it inherits nothing extra: `/cli`'s trading tools
+(`placeOrder`, `tradingCommit`, `tradingPush`, ...) call the exact same
+in-process `UTAManagerSDK` — Alice's one `OPENALICE_UTA_TOKEN` — that
+Telegram and the `tradingPush` AI tool already use, never a separately
+privileged credential. So an agent invoking trading tools via `/cli` is
+bounded by exactly the same two controls documented above: it can never
+present an `engine`-scoped token (that credential is never in Alice's
+process at all), and `tradingPush` still stops at the `allowAiTrading`
+gate.
+
+Verified with a real, non-fabricated test exercising the actual `/cli`
+dispatch chain (`registerCliRoutes`, tool-name resolution, Zod arg
+validation, the real `createTradingTools` staging logic) —
+`src/server/cli-trading-guard.spec.ts`:
+- Staging on an engine-owned account via `/cli` fails: UTA's real 403
+  (independently proven in `engine-account-guard.spec.ts`'s "Alice's
+  own token shape" case) propagates through as a `/cli` tool-error
+  response (`500 { error: "Error: Forbidden" }` — `server/cli.ts`
+  turns a tool `isError` result into a flat 500, discarding the
+  UTA-side `code`/`detail` fields down to just the top-level `error`
+  string; a minor observability gap, not a security one — staging
+  never silently succeeds either way).
+- `tradingPush` via `/cli` with `agent.allowAiTrading=false` never
+  calls UTA's push endpoint at all — it returns "requires manual
+  approval" and stops (the test's fake UTA `fetch` throws if push is
+  ever reached, so a silent execution would fail the test, not pass
+  it quietly). The reverse control (`allowAiTrading=true` DOES push)
+  is tested too, proving the gate is real, not a no-op that happens to
+  look right.
+
+The one piece intentionally **not** re-verified inside this test is
+UTA's own HTTP response — that's `engine-account-guard.spec.ts`'s job,
+for real, against the real middleware chain. Splitting it this way
+(rather than importing UTA's internals into Alice's test suite, or vice
+versa) keeps the test honest about the actual process boundary between
+the two services (`docs/project-structure.md`) instead of pretending
+they're one program.
+
 **Residual risk, until Fase 10 (documented, not closed here):** Alice,
 UTA, and any Workspace agent still run as the **same OS user** on the
 same host. Nothing in this change stops a Workspace agent's shell from
