@@ -20,6 +20,7 @@ import { r17Drawdown } from './rules/r17-drawdown.js'
 import { r18ModifyLimits } from './rules/r18-modify-limits.js'
 import { r19ConsecutiveRejects } from './rules/r19-consecutive-rejects.js'
 import { r20CapitalCap } from './rules/r20-capital-cap.js'
+import { r21MaxSpread } from './rules/r21-max-spread.js'
 import { makeRiskContext, makeAccountPolicy, makePlaceOrder, makeModifyOrder, makeAccountInfo, makePosition, makeContract } from './test-fixtures.js'
 import { initialRiskState } from './risk-state.js'
 
@@ -312,5 +313,66 @@ describe('R20 capital cap', () => {
   it('allows at or below capitalCap', () => {
     const ctx = makeRiskContext({ policy: makeAccountPolicy({ capitalCap: 5000 }), account: makeAccountInfo({ netLiquidation: '5000' }) })
     expect(r20CapitalCap.check(ctx)).toBeNull()
+  })
+})
+
+describe('R21 max spread (Fase 4c, A7a)', () => {
+  it('is a no-op when maxSpreadBps is not configured', () => {
+    const ctx = makeRiskContext({
+      policy: makeAccountPolicy({}),
+      quote: { contract: makeContract(), last: '100', bid: '90', ask: '110', volume: '1', timestamp: new Date() },
+    })
+    expect(r21MaxSpread.check(ctx)).toBeNull()
+  })
+
+  it('fails closed with no quote at all', () => {
+    const ctx = makeRiskContext({ policy: makeAccountPolicy({ maxSpreadBps: 50 }), quote: undefined })
+    expect(r21MaxSpread.check(ctx)?.code).toBe('R21')
+  })
+
+  it('rejects when bid/ask is unavailable (broker reports the 0 sentinel — CCXT/IBKR when the ticker has none)', () => {
+    const ctx = makeRiskContext({
+      policy: makeAccountPolicy({ maxSpreadBps: 50 }),
+      quote: { contract: makeContract(), last: '100', bid: '0', ask: '0', volume: '1', timestamp: new Date() },
+    })
+    expect(r21MaxSpread.check(ctx)?.code).toBe('R21')
+  })
+
+  it('rejects a negative bid (defensive — should never happen, but never silently divide by it)', () => {
+    const ctx = makeRiskContext({
+      policy: makeAccountPolicy({ maxSpreadBps: 50 }),
+      quote: { contract: makeContract(), last: '100', bid: '-1', ask: '100', volume: '1', timestamp: new Date() },
+    })
+    expect(r21MaxSpread.check(ctx)?.code).toBe('R21')
+  })
+
+  it('blocks when the spread exceeds the configured limit', () => {
+    // bid=99, ask=101, mid=100 -> spread = 2/100 * 10_000 = 200bps
+    const ctx = makeRiskContext({
+      policy: makeAccountPolicy({ maxSpreadBps: 100 }),
+      quote: { contract: makeContract(), last: '100', bid: '99', ask: '101', volume: '1', timestamp: new Date() },
+    })
+    const result = r21MaxSpread.check(ctx)
+    expect(result?.code).toBe('R21')
+    expect(result?.message).toContain('200.0bps')
+  })
+
+  it('allows a spread at or under the configured limit', () => {
+    // bid=99.9, ask=100.1, mid=100 -> spread = 0.2/100 * 10_000 = 20bps
+    const ctx = makeRiskContext({
+      policy: makeAccountPolicy({ maxSpreadBps: 20 }),
+      quote: { contract: makeContract(), last: '100', bid: '99.9', ask: '100.1', volume: '1', timestamp: new Date() },
+    })
+    expect(r21MaxSpread.check(ctx)).toBeNull()
+  })
+
+  it('applies to modifyOrder too, not just placeOrder', () => {
+    expect(r21MaxSpread.appliesTo).toContain('modifyOrder')
+    const ctx = makeRiskContext({
+      operation: makeModifyOrder({ totalQuantity: 1 }),
+      policy: makeAccountPolicy({ maxSpreadBps: 50 }),
+      quote: { contract: makeContract(), last: '100', bid: '0', ask: '0', volume: '1', timestamp: new Date() },
+    })
+    expect(r21MaxSpread.check(ctx)?.code).toBe('R21')
   })
 })

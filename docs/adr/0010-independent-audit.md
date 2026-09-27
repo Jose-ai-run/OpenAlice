@@ -1,8 +1,19 @@
 # ADR-0010: Auditoría independiente (A5)
 
-**Estado:** Propuesto — diseño únicamente, **cero implementación en esta ronda**
+**Estado:** Implementado — Fase 4c, `feat/engine-f4c-audit-spread`.
 **Fecha:** 2026-09-27
 **Fase:** F4c (Fase 4c de este mandato)
+
+## Implementación (2026-09-27)
+
+Implementado tal como se diseñó — `services/uta/src/domain/trading/risk/audit/`
+(`audit-job.ts` puro + `audit-log.ts` + `audit-runner.ts` de
+orquestación), corriendo al arrancar UTA y cada 24h (`main.ts`). El
+campo de correlación (`resultingCommitHash`/`operationIndex`) que este
+ADR identificó como faltante se implementó exactamente como se decidió
+arriba — ver `docs/risk-engine.md`'s sección "Commit correlation" y
+`docs/trading-engine/AUDIT.md` para la salida de verificación real
+(tests + typecheck + build).
 
 ## Contexto
 

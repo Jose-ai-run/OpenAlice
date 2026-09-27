@@ -44,13 +44,14 @@ import { r17Drawdown } from './rules/r17-drawdown.js'
 import { r18ModifyLimits } from './rules/r18-modify-limits.js'
 import { r19ConsecutiveRejects } from './rules/r19-consecutive-rejects.js'
 import { r20CapitalCap } from './rules/r20-capital-cap.js'
+import { r21MaxSpread } from './rules/r21-max-spread.js'
 
 export const RULE_CHAIN: readonly RiskRule[] = [
   r0KillSwitch, r1ActionAllowed, r2Account, r3SymbolSecType, r4TradingHours,
   r5QuoteFreshness, r6PriceBand, r7OrderNotional, r8ResultingPosition, r9Exposure,
   r10Leverage, r11OpenPositions, r12TradesPerDay, r13Cooldown, r14StopRequired,
   r15RiskPerTrade, r16DailyLoss, r17Drawdown, r18ModifyLimits, r19ConsecutiveRejects,
-  r20CapitalCap,
+  r20CapitalCap, r21MaxSpread,
 ]
 
 export interface RiskEngineDeps {

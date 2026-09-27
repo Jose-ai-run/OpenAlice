@@ -36,6 +36,8 @@ const accountRiskPolicySchema = z.object({
   maxQuoteAgeSeconds: z.number().positive().default(30),
   maxConsecutiveRejects: z.number().int().positive().optional(),
   capitalCap: z.number().positive().optional(),
+  /** [PROPUESTA] R21 (Fase 4c, A7a) — max bid/ask spread in basis points. Unset = rule disabled for this account. */
+  maxSpreadBps: z.number().positive().optional(),
 })
 export type AccountRiskPolicy = z.infer<typeof accountRiskPolicySchema>
 

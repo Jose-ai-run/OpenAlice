@@ -986,6 +986,199 @@ Los tres puntos: **confirmados con salida real, sin regresiones.**
 
 ---
 
+## 12. Segunda ronda de revisión sobre la 4b — items 1, 2, 4 (2026-09-27)
+
+Nota de proceso: los items 1, 2 y 4 de esta ronda se implementaron por
+error inicialmente sobre `docs/phil-improvements` en vez de
+`feat/engine-f4b-uta-auth` — detectado antes de commitear, movido con
+`git stash` a la rama correcta, `docs/phil-improvements` rebaseada
+encima sin conflictos. Documentado aquí para que quede trazable.
+
+### 12.1 Item 1 — salida real de los tests de A.1 (borrado/corrupción en caliente)
+
+Ya existían (creados en la ronda de correcciones anterior); se
+re-ejecutaron con `--reporter=verbose` para esta parada, salida real:
+
+```
+stderr | ... fails closed (503) when the tokens path was configured at boot but the file does not exist
+[uta:auth] tokens file unreadable/invalid — denying ALL requests, not falling back to compatibility mode: cannot read UTA tokens file at ...\definitely-does-not-exist-uta-tokens.json: ENOENT: no such file or directory, open '...'
+
+stderr | ... an empty file (zero bytes) denies everything — not valid JSON, not "no auth configured"
+[uta:auth] tokens file unreadable/invalid — denying ALL requests, not falling back to compatibility mode: UTA tokens file at ...\uta-tokens.json is not valid JSON: Unexpected end of JSON input
+
+✓ a valid token works, then deleting the file mid-run denies everything (401/503), never a silent pass-through
+✓ a corrupted file (truncated JSON) denies everything, then restoring valid content recovers
+✓ an empty file (zero bytes) denies everything — not valid JSON, not "no auth configured"
+```
+
+### 12.2 Item 2 — corrección de scope: `/uta/:id/sync`
+
+Confirmado, con salida real, que las otras 3 rutas señaladas ya
+resolvían correctamente (`operator`) y solo `/sync` necesitaba bajar a
+`stage` (escribe un commit real de sincronización de fills/cancelaciones,
+`UnifiedTradingAccount.sync() -> this.git.sync()`, no es una acción
+administrativa):
+
+```
+✓ POST /test-connection -> operator (matches requiredScope)
+✓ POST /uta/:id/reconnect -> operator (matches requiredScope)
+✓ POST /uta/:id/sync -> stage (matches requiredScope)         [corregido — antes: operator]
+✓ POST /uta/:id/simulate-price -> operator (matches requiredScope)
+✓ DELETE /uta/:id/snapshots/:timestamp -> operator (matches requiredScope)
+```
+
+`docs/uta-auth.md` documenta ahora, explícitamente y una por una, las 7
+rutas de escritura que sí resuelven a `read` (con su justificación) y
+las 4 que no pueden serlo (con su scope correcto).
+
+### 12.3 Item 4 — correlación commit↔decisión (requisito de A5, implementado ahora)
+
+Hallazgo real durante la implementación que corrige el diseño original
+de ADR-0010: el hash del commit y la posición de la operación ya se
+conocen en `TradingGit.executePush()` **antes** de invocar
+`executeOperation` (el hash se computa en `commit()`, antes de
+`push()`) — no había que inventar un campo en otro punto, solo
+pasarlo. `TradingGitConfig.executeOperation` ahora recibe
+`{commitHash, operationIndex}`; `risk-decisions.jsonl` gana
+`pendingHash`, `operationIndex`, y `orderId` (solo para
+modifyOrder/cancelOrder — verificado que `Order.orderId` es `0` hasta
+que el broker lo asigna, así que se omite para placeOrder en vez de
+loguear un `0` sin sentido).
+
+Salida real, nuevo `risk-decision-correlation.spec.ts` (verifica contra
+el flujo real `stage -> commit -> push`, no solo el valor de retorno de
+`toLogEntry` en aislado):
+
+```
+✓ a single placeOrder logs pendingHash === the real push commit hash, operationIndex 0, and no orderId (none exists yet)
+✓ two operations staged into ONE commit share the same pendingHash but get distinct operationIndex values
+✓ a modifyOrder logs the real orderId (a genuine pre-existing correlation field, unlike placeOrder)
+✓ a rejected operation (never reaches the broker) still logs a correlation to the commit that recorded the rejection
+```
+
+### 12.4 Resultado tras items 1, 2, 4
+
+```
+cd services/uta && pnpm typecheck    # limpio
+pnpm test:owner:uta                  # 71/71 archivos, 1233/1233 tests
+pnpm test:integration:uta            # 1/1, 15/15
+cd services/uta && pnpm build        # limpio (dist/uta.js 342.22 KB)
+```
+
+---
+
+## 13. Fase 4c — Auditoría independiente + R21 (`feat/engine-f4c-audit-spread`) — 2026-09-27
+
+Alcance exacto pedido: **solo A5 y A7a**, todo detrás de
+`OPENALICE_RISK_ENGINE_ENABLED`, fail-closed.
+
+### 13.1 R21 — max spread (A7a)
+
+`services/uta/src/domain/trading/risk/rules/r21-max-spread.ts` — nueva
+regla, registrada en `RULE_CHAIN` tras R20. Antes de escribirla se
+verificó qué da cada broker pack real (`bid:`/`ask:` en cada
+`*Broker.ts`): Alpaca/CCXT/IBKR/Longbridge/MockBroker dan bid/ask real
+(CCXT/IBKR caen a `'0'` cuando el ticker no lo tiene — el sentinel que
+R21 detecta); **Leverup no** — pone `bid: last, ask: last` con el
+comentario explícito "Pyth gives mid; no bid/ask split", así que
+`spreadBps` da siempre `0` para Leverup. Documentado como limitación
+conocida en `docs/risk-engine.md` y en `BACKLOG.md`, no oculto —
+detectar genéricamente "bid === ask" como señal de "no disponible" se
+consideró y se descartó (falso positivo en un mercado real
+momentáneamente ajustado en cualquier otro broker).
+
+`deploy/examples/risk-policy.example.json` creado (pendiente desde
+ADR-0004, Fase 1) con `maxSpreadBps: 50` incluido; nuevo test en
+`policy.spec.ts` que lo carga vía `loadRiskPolicy()` real.
+
+Salida real (`rules.spec.ts`, suite `R21 max spread`):
+
+```
+✓ is a no-op when maxSpreadBps is not configured
+✓ fails closed with no quote at all
+✓ rejects when bid/ask is unavailable (broker reports the 0 sentinel — CCXT/IBKR when the ticker has none)
+✓ rejects a negative bid (defensive — should never happen, but never silently divide by it)
+✓ blocks when the spread exceeds the configured limit
+✓ allows a spread at or under the configured limit
+✓ applies to modifyOrder too, not just placeOrder
+```
+
+### 13.2 A5 — auditoría independiente
+
+`services/uta/src/domain/trading/risk/audit/` — `audit-job.ts` (puro:
+`auditAccount()`), `audit-log.ts` (`data/trading/<id>/_risk/audit.jsonl`,
+solo se escribe si hay discrepancia), `audit-runner.ts`
+(`runAuditAndEnforce()`: no-op con el flag apagado, si no hay hallazgos
+no hace nada, si los hay fuerza `HALT_NEW` + `console.error` + persiste).
+Corre al arrancar UTA y cada 24h (`main.ts`).
+
+Tres tipos de hallazgo: `MISSING_DECISION` (operación ejecutada sin
+PASS correspondiente — el caso pedido explícitamente), `RISK_BYPASSED`
+(una decisión rechazada cuya operación igual tuvo éxito — más grave
+aún), `PASS_DURING_HALT` (una decisión permitida mientras el kill
+switch ya estaba activo). Un desajuste de `policyHash` es solo una nota
+informativa, nunca un hallazgo duro — este repo no conserva historial
+de versiones pasadas de la política, así que un cambio normal de
+política con el tiempo no es distinguible de una manipulación sin ese
+historial; tratar cada desajuste como discrepancia haría fallar la
+auditoría con cualquier actualización rutinaria del operador, no solo
+con problemas reales.
+
+Salida real (`audit-job.spec.ts`, lógica pura con fixtures sintéticos):
+
+```
+✓ a clean ledger (every executed operation has its matching PASS) passes with no findings
+✓ an operation executed with no matching decision at all -> MISSING_DECISION
+✓ a decision recorded as rejected, but the operation succeeded anyway -> RISK_BYPASSED
+✓ an allowed decision recorded while the kill switch was already HALT_NEW -> PASS_DURING_HALT
+✓ closePosition/cancelOrder operations are skipped entirely — the RiskEngine never evaluates them
+✓ a policyHash mismatch is an informational note, not a hard finding (policy changes over time are normal)
+```
+
+Salida real (`audit-runner.spec.ts`, **contra un push real**, no un
+fixture sintético — exactamente el criterio de aceptación pedido: "una
+operación ejecutada sin PASS"):
+
+```
+✓ no-ops entirely when the RiskEngine flag is off — nothing to audit
+✓ a clean ledger (real push, decision log intact) passes with no HALT_NEW and no audit.jsonl
+✓ an operation executed with no matching PASS (log entry lost after the fact) fails the audit, forces HALT_NEW, logs an alert, and persists the finding
+```
+
+El tercer test: hace un `stage -> commit -> push` real con
+`OPENALICE_RISK_ENGINE_ENABLED=1`, borra `risk-decisions.jsonl`
+después (simulando la pérdida real que la auditoría existe para
+detectar — no un caso sintético), corre `runAuditAndEnforce`, y
+confirma: `result.ok === false`, `killSwitch` pasa a `HALT_NEW` (leído
+de vuelta con `getKillSwitchStatus`, no solo el valor de retorno),
+`console.error` se llamó con el mensaje real, y `audit.jsonl` contiene
+`MISSING_DECISION` en disco.
+
+### 13.3 Resultado final
+
+```
+cd services/uta && pnpm typecheck                          # limpio
+pnpm test:owner:uta                                         # 73/73 archivos, 1250/1250 tests (flag off — línea base + tests nuevos de R21/auditoría)
+pnpm test:integration:uta                                   # 1/1, 15/15 (sin cambios)
+cd services/uta && pnpm build                               # limpio (dist/uta.js 347.92 KB)
+OPENALICE_RISK_ENGINE_ENABLED=1 node scripts/run-tests.mjs --package @traderalice/uta-service
+  # 20 fallos — MISMO comportamiento ya documentado en Fase 4a (docs/risk-engine.md,
+  # "flag on, no policy configured: fails closed everywhere that writes — expected,
+  # not a regression"); no relacionado con R21/auditoría, no investigado más a fondo
+  # por ser un resultado ya conocido de antes de esta fase.
+```
+
+### 13.4 Pendiente — `MEJORAS_DESDE_PHIL.md`
+
+El usuario indicó haberlo guardado en `C:\AliceTrader\MEJORAS_DESDE_PHIL.md`;
+verificado dos veces en esta sesión (`Test-Path`, `Get-ChildItem`) y
+**no está en esa ruta ni en ningún lugar accesible de `C:\AliceTrader\`**.
+No se copió a `docs/trading-engine/` ni se quitó la nota
+correspondiente en `BACKLOG.md` — pendiente de que el usuario confirme
+la ruta real o lo vuelva a adjuntar.
+
+---
+
 ## Resumen de la línea de tiempo de esta sesión
 
 - Herramientas verificadas: git 2.49.0, Node v24.12.0, pnpm 11.7.0 (vía `corepack pnpm`).

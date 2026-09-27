@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { mkdtemp, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { loadRiskPolicy, resolveAccountPolicy, riskPolicySchema } from './policy.js'
 
 const VALID_POLICY = {
@@ -22,6 +22,17 @@ async function withTempFile(content: string | null, fn: (path: string) => Promis
     await rm(dir, { recursive: true, force: true })
   }
 }
+
+describe('deploy/examples/risk-policy.example.json — CI schema validation (Fase 4c, ADR-0010)', () => {
+  it('loads and validates cleanly through loadRiskPolicy, including the new R21 maxSpreadBps field', async () => {
+    const examplePath = resolve(process.cwd(), 'deploy/examples/risk-policy.example.json')
+    const result = await loadRiskPolicy(examplePath)
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.policy.accounts['default']?.maxSpreadBps).toBe(50)
+    }
+  })
+})
 
 describe('loadRiskPolicy', () => {
   it('loads and hashes a valid policy', async () => {

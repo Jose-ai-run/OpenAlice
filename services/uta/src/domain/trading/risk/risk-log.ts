@@ -3,7 +3,7 @@
  * RiskEngine evaluation, per PROMPT_MASTER_CLAUDE_CODE.md §14: "Registrar
  * cada evaluación ... con policyHash, entradas y resultado por regla."
  */
-import { appendFile, mkdir } from 'node:fs/promises'
+import { appendFile, mkdir, readFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { dataPath } from '@/core/paths.js'
 import type { Operation } from '../git/types.js'
@@ -75,4 +75,30 @@ export async function appendRiskDecision(accountId: string, entry: RiskDecisionL
   const filePath = riskLogPath(accountId)
   await mkdir(dirname(filePath), { recursive: true })
   await appendFile(filePath, `${JSON.stringify(entry)}\n`)
+}
+
+/**
+ * [PROPUESTA] Fase 4c (A5, ADR-0010) — read side for the independent
+ * audit job. A missing file (no decisions ever logged — e.g. the
+ * RiskEngine flag has never been on for this account) is not an error;
+ * a line that fails to parse is skipped rather than aborting the whole
+ * read, so one corrupt line doesn't hide every other real decision from
+ * the audit.
+ */
+export async function readRiskDecisions(accountId: string): Promise<RiskDecisionLogEntry[]> {
+  let raw: string
+  try {
+    raw = await readFile(riskLogPath(accountId), 'utf-8')
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return []
+    throw err
+  }
+  const entries: RiskDecisionLogEntry[] = []
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue
+    try {
+      entries.push(JSON.parse(line) as RiskDecisionLogEntry)
+    } catch { /* skip a corrupt line — never let one bad entry hide the rest */ }
+  }
+  return entries
 }

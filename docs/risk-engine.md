@@ -111,14 +111,20 @@ check):
 | R18 | `modifyOrder` cannot increase quantity or change the stop price unverified |
 | R19 | Too many consecutive rejects — **triggers `HALT_NEW`** |
 | R20 | Hard capital cap (absolute, not %-of-equity) |
+| R21 | Max bid/ask spread in bps (`maxSpreadBps`) — rejects on no usable bid/ask too |
 
-**R21 (planned, Fase 4c, [[docs/adr/0010-independent-audit.md]]):**
-`maxSpreadBps` per account/symbol — rejects when `(ask − bid)/mid ×
-10,000` exceeds the configured limit, or when no bid/ask is available
-at all. Registered in [[docs/trading-engine/BACKLOG.md]] (A7a) —
-verify what each broker pack's `Quote` actually exposes before
-implementing; do not synthesize a value for one that doesn't provide
-bid/ask.
+**R21 (implemented, Fase 4c, A7a, [[docs/adr/0010-independent-audit.md]]):**
+`spreadBps = (ask − bid)/mid × 10,000`, rejected when it exceeds
+`policy.maxSpreadBps`, or when the quote has no usable bid/ask at all
+(`bid`/`ask` ≤ 0 — the sentinel CCXT/IBKR report when their ticker has
+none). Unset `maxSpreadBps` disables the rule for that account, same as
+every other optional policy field. **Known gap, documented rather than
+hidden:** `brokers/others/leverup/LeverupBroker.ts` sets `bid: last,
+ask: last` (no real bid/ask split — Pyth only gives mid) — `spreadBps`
+computes to exactly `0` for every Leverup quote, so R21 provides no
+actual protection on Leverup accounts. See `rules/r21-max-spread.ts`'s
+docstring for why a generic "bid === ask" heuristic was rejected (false
+positives on a real, momentarily tight market elsewhere).
 
 ## Persistent state and the kill switch
 
@@ -167,6 +173,46 @@ only after the dispatch actually resolves without throwing — writes the
 cooldown. With the flag off, behavior is unchanged from before Fase 4a,
 defect included.
 
+## Independent audit (A5, Fase 4c, [[docs/adr/0010-independent-audit.md]])
+
+`risk/audit/audit-job.ts`'s `auditAccount()` cross-checks every executed
+`placeOrder`/`modifyOrder` operation in `TradingGit`'s real commit log
+against `risk-decisions.jsonl`, independent of the RiskEngine/auth
+preventive controls themselves — a bug in either of those could fail
+silently; this doesn't share their blind spot. Correlation is exact
+(`pendingHash` + `operationIndex`, threaded from `TradingGit.executePush()`
+itself — see "Commit correlation" below), not fuzzy timestamp matching.
+
+Runs once at UTA boot and daily thereafter (`main.ts`'s `auditTimer`),
+per account, and no-ops entirely when the flag is off (nothing to
+cross-check). On any discrepancy (a commit with no matching decision, a
+rejected decision whose operation nonetheless succeeded, or an allowed
+decision recorded while the kill switch was already halted):
+`console.error` + `triggerKillSwitch(accountId, 'HALT_NEW', ...)` +
+an entry in `data/trading/<accountId>/_risk/audit.jsonl`. A clean ledger
+produces neither a log line nor a file — silence is the expected state.
+
+A policy-hash mismatch between a past decision and the current policy
+is recorded only as an informational note, never a hard finding — this
+repo doesn't retain a history of past policy versions, so a normal
+policy update over time isn't distinguishable from tampering without
+one; treating every mismatch as a discrepancy would fail closed on
+routine operator changes, not just real problems.
+
+## Commit correlation (Fase 4c item 4 — a requisite of A5, not a follow-up)
+
+`TradingGit.executePush()` already knows the resulting commit's hash
+(computed at `commit()`, before `push()` ever calls `executeOperation`)
+and each operation's position within it — both are now threaded through
+`TradingGitConfig.executeOperation(op, { commitHash, operationIndex })`
+into `risk-dispatcher.ts` into `evaluateRisk()`, and logged verbatim as
+`RiskDecisionLogEntry.pendingHash`/`operationIndex`. `orderId` is also
+logged, but **only** for `modifyOrder`/`cancelOrder` — `placeOrder` has
+no client-assigned id at evaluation time (`Order.orderId` defaults to
+`0` until the broker assigns one post-submission,
+`packages/ibkr/src/order.ts`), so logging a meaningless `0` was rejected
+in favor of omitting the field entirely.
+
 ## Verification
 
 ```bash
@@ -190,5 +236,5 @@ default.
 | Kill switch semantics | `risk/kill-switch.ts` + `risk-state.spec.ts` |
 | Deployment-safety gate | `risk/deployment-safety.ts` + this guide's "Deployment safety" section |
 | Auth on top of this (tokens/scopes) | [[docs/uta-auth.md]] (Fase 4b, ADR-0003) — a separate concern from the risk gate itself |
-| A new R21+ rule or independent audit job | [[docs/adr/0010-independent-audit.md]] (Fase 4c) + [[docs/trading-engine/BACKLOG.md]] for the full registry of registered-but-not-yet-implemented improvements |
+| A new rule past R21, or a change to the audit job | `risk/rules/` + `rules.spec.ts`, or `risk/audit/` + its specs — [[docs/adr/0010-independent-audit.md]] (Fase 4c, implemented) + [[docs/trading-engine/BACKLOG.md]] for the full registry |
 | Engine lease/fencing (a second Engine instance writing concurrently) | [[docs/adr/0009-engine-lease-fencing.md]] (Fase 7) — orthogonal to the R0–R20 chain, sits in the auth/identity layer |

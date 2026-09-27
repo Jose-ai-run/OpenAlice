@@ -43,11 +43,13 @@ import {
   resolveUtaBindHost,
 } from './domain/trading/auth/deployment-safety.js'
 import { resolveUtaTokensFilePath } from './domain/trading/auth/tokens-file.js'
+import { runAuditAndEnforce } from './domain/trading/risk/audit/audit-runner.js'
 import { userDataHome } from '@/core/paths.js'
 import type { UTAEngineContext } from './types.js'
 
 const UTA_PORT = Number(process.env['OPENALICE_UTA_PORT'] ?? 47333)
 const CATALOG_REFRESH_MS = 6 * 60 * 60 * 1000  // 6h
+const AUDIT_INTERVAL_MS = 24 * 60 * 60 * 1000  // 24h — [PROPUESTA] Fase 4c (A5, ADR-0010)
 
 export async function startUTAService(): Promise<void> {
   const startedAt = new Date().toISOString()
@@ -182,6 +184,21 @@ export async function startUTAService(): Promise<void> {
   }, CATALOG_REFRESH_MS)
   catalogRefreshTimer.unref?.()
 
+  // ==================== Independent audit (A5, ADR-0010) ====================
+  // Runs once at boot, then daily. No-ops per account when the RiskEngine
+  // flag is off (nothing to cross-check yet) — see audit-runner.ts.
+
+  const runAuditPass = (): void => {
+    for (const uta of utaManager.resolve()) {
+      runAuditAndEnforce(uta).catch((err) => {
+        console.error(`[uta:audit] audit pass for "${uta.id}" threw unexpectedly:`, err instanceof Error ? err.message : err)
+      })
+    }
+  }
+  runAuditPass()
+  const auditTimer = setInterval(runAuditPass, AUDIT_INTERVAL_MS)
+  auditTimer.unref?.()
+
   // ==================== HTTP app ====================
 
   const app = new Hono()
@@ -230,6 +247,7 @@ export async function startUTAService(): Promise<void> {
     stopping = true
     console.log(`[uta] ${signal} → shutdown`)
     clearInterval(catalogRefreshTimer)
+    clearInterval(auditTimer)
     snapshotScheduler.stop()
     server.close()
     await utaManager.closeAll().catch(() => { /* swallow during shutdown */ })
