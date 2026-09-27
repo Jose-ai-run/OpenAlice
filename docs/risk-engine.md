@@ -113,18 +113,41 @@ check):
 | R20 | Hard capital cap (absolute, not %-of-equity) |
 | R21 | Max bid/ask spread in bps (`maxSpreadBps`) — rejects on no usable bid/ask too |
 
-**R21 (implemented, Fase 4c, A7a, [[docs/adr/0010-independent-audit.md]]):**
-`spreadBps = (ask − bid)/mid × 10,000`, rejected when it exceeds
-`policy.maxSpreadBps`, or when the quote has no usable bid/ask at all
-(`bid`/`ask` ≤ 0 — the sentinel CCXT/IBKR report when their ticker has
-none). Unset `maxSpreadBps` disables the rule for that account, same as
-every other optional policy field. **Known gap, documented rather than
-hidden:** `brokers/others/leverup/LeverupBroker.ts` sets `bid: last,
-ask: last` (no real bid/ask split — Pyth only gives mid) — `spreadBps`
-computes to exactly `0` for every Leverup quote, so R21 provides no
-actual protection on Leverup accounts. See `rules/r21-max-spread.ts`'s
-docstring for why a generic "bid === ask" heuristic was rejected (false
-positives on a real, momentarily tight market elsewhere).
+**R21 (implemented, Fase 4c, A7a, [[docs/adr/0010-independent-audit.md]];
+corrected 2026-09-27):** `spreadBps = (ask − bid)/mid × 10,000`,
+rejected when it exceeds `policy.maxSpreadBps`. A quote is treated as
+**not real bid/ask data** ("synthetic") in three cases, and rejected by
+default the same as a missing quote:
+1. `bid`/`ask` ≤ 0 — the sentinel CCXT/IBKR report when their ticker
+   has none.
+2. `bid === ask` — e.g. `brokers/others/leverup/LeverupBroker.ts` sets
+   `bid: last, ask: last` (no real bid/ask split — Pyth only gives
+   mid); left unchecked this would compute a spread of exactly `0` and
+   pass every positive limit trivially, the opposite of protection.
+3. `bid > ask` — a crossed quote, never legitimate.
+
+Unset `maxSpreadBps` disables the rule entirely for that account, same
+as every other optional policy field. **Explicit per-account opt-in:**
+`policy.allowSyntheticQuotes` (default `false`) — an operator who
+accepts that R21 provides no real protection for a specific account
+(Leverup, or any keyless/synthetic-quote source) can set it. With it
+set, a synthetic-looking quote isn't rejected — R21 simply doesn't
+evaluate a spread for it (never fabricates a number from a crossed or
+degenerate quote); a *real* wide spread on that same account still
+rejects normally. See `rules/r21-max-spread.ts`'s docstring for why a
+blanket "bid === ask" rejection (with no opt-in) was rejected in the
+first pass (false positives on a real, momentarily tight market
+elsewhere) in favor of this default-closed/explicit-opt-in shape.
+
+**Which brokers give real bid/ask vs. synthetic — verified by reading
+every pack before writing this rule, registered in
+[[docs/trading-engine/BACKLOG.md]]:**
+
+| Broker | Real bid/ask? |
+|---|---|
+| Alpaca, Longbridge, MockBroker | Yes |
+| CCXT, IBKR | Yes — both fall back to `'0'` (the "absent" case above) when the underlying ticker has none |
+| **Leverup** | **No** — `bid: last, ask: last` always (Pyth gives mid only) |
 
 ## Persistent state and the kill switch
 

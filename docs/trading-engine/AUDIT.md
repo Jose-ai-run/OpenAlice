@@ -1368,6 +1368,32 @@ continúe el Hito 1) queda pendiente de documentar en
 
 ---
 
+## 15. Fase 4c aprobada con ajuste — R21 con cotizaciones sintéticas (2026-09-27)
+
+Corregido `rules/r21-max-spread.ts`: ausente, `bid === ask`, o
+`bid > ask` → "sin datos" → rechazo por defecto; `policy.allowSyntheticQuotes`
+(default `false`) anula los tres casos por cuenta, sin fabricar un
+número de spread desde una cotización cruzada o degenerada. Tabla de
+brokers real vs. sintético registrada en `docs/risk-engine.md` y
+`docs/trading-engine/BACKLOG.md`.
+
+Salida real (`rules.spec.ts`, nuevos casos):
+
+```
+✓ rejects bid === ask by default (Leverup-style synthetic quote — bid=ask=last)
+✓ rejects a crossed quote (bid > ask) by default
+✓ allowSyntheticQuotes:true accepts a Leverup-style bid===ask quote instead of rejecting
+✓ allowSyntheticQuotes:true also accepts a crossed quote (no meaningful spread is computed, the rule just does not apply)
+✓ allowSyntheticQuotes:true also accepts a non-positive (absent) quote
+✓ allowSyntheticQuotes:true does NOT weaken a real, wide spread — that still rejects normally
+```
+
+`node scripts/run-tests.mjs --package @traderalice/uta-service` → 55/55
+archivos, 1150/1150 tests. `pnpm test:owner:uta` → 73/73, 1256/1256.
+`services/uta && pnpm build` → limpio (348.48 KB).
+
+---
+
 ## Resumen de la línea de tiempo de esta sesión
 
 - Herramientas verificadas: git 2.49.0, Node v24.12.0, pnpm 11.7.0 (vía `corepack pnpm`).

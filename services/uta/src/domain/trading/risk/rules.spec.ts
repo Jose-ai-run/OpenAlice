@@ -346,6 +346,57 @@ describe('R21 max spread (Fase 4c, A7a)', () => {
     expect(r21MaxSpread.check(ctx)?.code).toBe('R21')
   })
 
+  it('rejects bid === ask by default (Leverup-style synthetic quote — bid=ask=last)', () => {
+    const ctx = makeRiskContext({
+      policy: makeAccountPolicy({ maxSpreadBps: 50 }),
+      quote: { contract: makeContract(), last: '100', bid: '100', ask: '100', volume: '1', timestamp: new Date() },
+    })
+    const result = r21MaxSpread.check(ctx)
+    expect(result?.code).toBe('R21')
+    expect(result?.message).toContain('allowSyntheticQuotes')
+  })
+
+  it('rejects a crossed quote (bid > ask) by default', () => {
+    const ctx = makeRiskContext({
+      policy: makeAccountPolicy({ maxSpreadBps: 50 }),
+      quote: { contract: makeContract(), last: '100', bid: '101', ask: '99', volume: '1', timestamp: new Date() },
+    })
+    expect(r21MaxSpread.check(ctx)?.code).toBe('R21')
+  })
+
+  it('allowSyntheticQuotes:true accepts a Leverup-style bid===ask quote instead of rejecting', () => {
+    const ctx = makeRiskContext({
+      policy: makeAccountPolicy({ maxSpreadBps: 50, allowSyntheticQuotes: true }),
+      quote: { contract: makeContract(), last: '100', bid: '100', ask: '100', volume: '1', timestamp: new Date() },
+    })
+    expect(r21MaxSpread.check(ctx)).toBeNull()
+  })
+
+  it('allowSyntheticQuotes:true also accepts a crossed quote (no meaningful spread is computed, the rule just does not apply)', () => {
+    const ctx = makeRiskContext({
+      policy: makeAccountPolicy({ maxSpreadBps: 50, allowSyntheticQuotes: true }),
+      quote: { contract: makeContract(), last: '100', bid: '101', ask: '99', volume: '1', timestamp: new Date() },
+    })
+    expect(r21MaxSpread.check(ctx)).toBeNull()
+  })
+
+  it('allowSyntheticQuotes:true also accepts a non-positive (absent) quote', () => {
+    const ctx = makeRiskContext({
+      policy: makeAccountPolicy({ maxSpreadBps: 50, allowSyntheticQuotes: true }),
+      quote: { contract: makeContract(), last: '100', bid: '0', ask: '0', volume: '1', timestamp: new Date() },
+    })
+    expect(r21MaxSpread.check(ctx)).toBeNull()
+  })
+
+  it('allowSyntheticQuotes:true does NOT weaken a real, wide spread — that still rejects normally', () => {
+    // bid=90, ask=110, mid=100 -> 2000bps, well over the 50bps limit, and not a synthetic shape.
+    const ctx = makeRiskContext({
+      policy: makeAccountPolicy({ maxSpreadBps: 50, allowSyntheticQuotes: true }),
+      quote: { contract: makeContract(), last: '100', bid: '90', ask: '110', volume: '1', timestamp: new Date() },
+    })
+    expect(r21MaxSpread.check(ctx)?.code).toBe('R21')
+  })
+
   it('blocks when the spread exceeds the configured limit', () => {
     // bid=99, ask=101, mid=100 -> spread = 2/100 * 10_000 = 200bps
     const ctx = makeRiskContext({

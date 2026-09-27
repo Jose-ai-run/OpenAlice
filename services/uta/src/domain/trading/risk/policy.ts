@@ -38,6 +38,12 @@ const accountRiskPolicySchema = z.object({
   capitalCap: z.number().positive().optional(),
   /** [PROPUESTA] R21 (Fase 4c, A7a) — max bid/ask spread in basis points. Unset = rule disabled for this account. */
   maxSpreadBps: z.number().positive().optional(),
+  /** [PROPUESTA] R21 corrección 2026-09-27 — explicit per-account opt-in
+   *  to accept a broker whose bid/ask isn't real (e.g. Leverup, which
+   *  sets bid=ask=last). Default false: a synthetic-looking quote
+   *  (absent, bid===ask, or bid>ask) rejects by default, same as a
+   *  missing quote — see rules/r21-max-spread.ts. */
+  allowSyntheticQuotes: z.boolean().default(false),
 })
 export type AccountRiskPolicy = z.infer<typeof accountRiskPolicySchema>
 

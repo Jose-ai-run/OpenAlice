@@ -43,10 +43,33 @@ documento de Phil — así lo estableció el usuario explícitamente.
 | A4 | Evidencia fechada: `frozen_at` por versión de estrategia al entrar en PAPER; cualquier cambio de parámetros o código crea una nueva versión con el contador de evidencia en cero; los gates de promoción solo cuentan decisiones posteriores a `frozen_at`; el evaluador de gates es código (determinista), no juicio humano ad hoc, y solo emite informe cuando hay datos suficientes. | F6 | Cambiar un parámetro crea una versión nueva de la estrategia con el contador de evidencia en cero. | [[docs/adr/0008-dated-evidence-counterfactual-ledger.md]] |
 | A5 | Auditoría independiente: job en UTA (al arrancar y diario) que verifica que cada operación ejecutada en TradingGit tenga su PASS correspondiente en `risk-decisions.jsonl`, que respete los topes de la política vigente en ese momento (por `policyHash`), y que no haya ocurrido con el kill switch en `HALT_NEW` o `FLATTEN`. Cualquier discrepancia → `HALT_NEW` + alerta + entrada en `data/trading/_risk/audit.jsonl`. En CI: valida el esquema de la política de ejemplo y del estado de riesgo. | **F4c — implementado 2026-09-27** | Una operación ejecutada sin su PASS correspondiente hace fallar la auditoría, fuerza `HALT_NEW` y queda registrada; un ledger consistente pasa sin alertar. | [[docs/adr/0010-independent-audit.md]] |
 | A6 | Lease + fencing para el Engine: `POST /api/trading/risk/engine-lease` (scope `engine`) `{accountId, instanceId, ttlSec}` → `{epoch, expiresAt}`; heartbeat periódico; al vencer el TTL, otra instancia toma `epoch+1`; toda escritura de scope `engine` debe enviar `X-Engine-Epoch`, UTA responde 409 si no coincide con la época vigente; la época se persiste de forma atómica en `data/trading/_risk/engine-lease.json`; si ese estado es ilegible → `HALT_NEW` para el scope `engine` específicamente. | F7 | Una segunda instancia del Engine no obtiene el lease mientras la primera lo sostiene; al expirar el TTL la segunda toma `epoch+1` y la primera recibe 409 en su siguiente escritura. | [[docs/adr/0009-engine-lease-fencing.md]] |
-| A7a | Regla R21 `maxSpreadBps` por cuenta/símbolo en la política RO: `spreadBps = (ask − bid)/mid × 10.000`; sin `bid`/`ask` disponible → rechazo. Requiere verificar primero qué expone `Quote` hoy y qué entrega cada broker pack (si alguno no da bid/ask, documentarlo explícitamente antes de escribir la regla). | **F4c — implementado 2026-09-27** | Sin bid/ask disponible, R21 rechaza; con spread por encima del límite configurado, R21 rechaza. | [[docs/adr/0010-independent-audit.md]] (comparte fase F4c; sin ADR propio — es una regla R* más, mismo patrón que R0–R20). Hallazgo real de la verificación previa: `LeverupBroker` no da bid/ask real (`bid=ask=last`) — R21 no lo protege, documentado en `docs/risk-engine.md`, no oculto. |
+| A7a | Regla R21 `maxSpreadBps` por cuenta/símbolo en la política RO: `spreadBps = (ask − bid)/mid × 10.000`; ausente, `bid === ask`, o `bid > ask` → tratado como "sin datos" → rechazo, salvo `policy.allowSyntheticQuotes: true` explícito por cuenta (default `false`). | **F4c — implementado 2026-09-27, corregido 2026-09-27** | Sin bid/ask disponible, R21 rechaza; `bid === ask` rechaza; `bid > ask` rechaza; con `allowSyntheticQuotes: true` los tres casos pasan (sin regla, no un número fabricado); con spread real por encima del límite, R21 rechaza igual con el flag activo. | [[docs/adr/0010-independent-audit.md]] (comparte fase F4c; sin ADR propio — es una regla R* más, mismo patrón que R0–R20). |
 | A7b | Fills honestos en paper: comprar al ask, vender al bid, más slippage. Extiende M10 de forma retrocompatible si el simulador de paper no admite bid/ask todavía. Se guarda bid/ask/spread al decidir, al hacer commit y al llenarse. | F5 | En paper, una compra se ejecuta al ask y una venta al bid, con slippage aplicado encima. | — |
 | A11 | Secretos: el usuario activa secret scanning, push protection y protección de la rama `main` en GitHub. El agente corre `gitleaks` (o equivalente) sobre **todo el historial de todas las ramas** antes del primer push al fork, y reporta hallazgos sin mostrar valores de credenciales — nunca push directo a `main`. | Antes del primer push al fork | `gitleaks` (o equivalente) corre sobre el historial completo y el reporte no contiene ningún valor de credencial, solo su forma y origen. | — |
 | S1 | Cerrar el camino agente → Alice → UTA: las rutas de escritura del proxy de Alice exigen sesión autenticada + CSRF incluso desde loopback; en UTA, las cuentas del Engine (marcadas en la política RO) solo aceptan `stage`/`commit` con scope `engine` y `push` en modo `HUMAN_APPROVAL` (solo el `pendingHash` que el propio Engine creó). | F4d (Fase 4d de este mandato) | Desde loopback sin sesión: push/place-order/stage/config de agente → 401. Con sesión válida, la UI aprueba. Telegram sigue aprobando por su vía real. Una cuenta del Engine rechaza staging con el token de Alice (que no lleva scope `engine`). | — (se diseña dentro de la propia Fase 4d si hace falta; no listado en el pedido de ADRs de esta ronda) |
+
+## R21 — qué broker da bid/ask real (verificado leyendo cada pack, A7a)
+
+`Quote.bid`/`Quote.ask` son strings no-opcionales en el wire — un
+broker sin bid/ask real no puede señalar "no disponible" vía
+`undefined`, solo con un valor centinela. Verificado contra el código
+real de cada broker pack antes de escribir R21 (`services/uta/src/domain/trading/brokers/`):
+
+| Broker | Real bid/ask | Detalle |
+|---|---|---|
+| Alpaca | Sí | `AlpacaBroker.ts:607-608,622-623` |
+| Longbridge | Sí | `LongbridgeBroker.ts:647-648` |
+| MockBroker | Sí (sintético pero coherente) | `MockBroker.ts:485-486` — `bid = price - 0.01`, `ask = price + 0.01` |
+| CCXT | Sí, con fallback a `'0'` cuando el ticker del exchange no lo trae | `CcxtBroker.ts:1237-1238` — `bid: String(ticker.bid ?? 0)` |
+| IBKR | Sí, con el mismo fallback a `'0'` | `IbkrBroker.ts:818-819` — `bid: String(snap.bid ?? 0)` |
+| **Leverup** | **No** — nunca | `LeverupBroker.ts:506-507` — `bid: last, ask: last` con el comentario explícito "Pyth gives mid; no bid/ask split" |
+
+R21 (`services/uta/src/domain/trading/risk/rules/r21-max-spread.ts`)
+trata como "sin datos" (rechazo por defecto): `bid`/`ask` ≤ 0 (el
+fallback de CCXT/IBKR), `bid === ask` (el caso permanente de Leverup),
+y `bid > ask` (cotización cruzada, nunca legítima). Cada uno de los
+tres es anulable por cuenta con `policy.allowSyntheticQuotes: true` —
+ver `docs/risk-engine.md`.
 
 ## Congeladas (registrar, NO implementar hasta aprobar Fase 8)
 

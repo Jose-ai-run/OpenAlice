@@ -22,6 +22,7 @@ export function makeAccountPolicy(overrides: Partial<AccountRiskPolicy> = {}): A
     tradingHours: 'always',
     requireStopLoss: true,
     maxQuoteAgeSeconds: 30,
+    allowSyntheticQuotes: false,
     ...overrides,
   }
 }
