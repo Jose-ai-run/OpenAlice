@@ -112,6 +112,14 @@ check):
 | R19 | Too many consecutive rejects — **triggers `HALT_NEW`** |
 | R20 | Hard capital cap (absolute, not %-of-equity) |
 
+**R21 (planned, Fase 4c, [[docs/adr/0010-independent-audit.md]]):**
+`maxSpreadBps` per account/symbol — rejects when `(ask − bid)/mid ×
+10,000` exceeds the configured limit, or when no bid/ask is available
+at all. Registered in [[docs/trading-engine/BACKLOG.md]] (A7a) —
+verify what each broker pack's `Quote` actually exposes before
+implementing; do not synthesize a value for one that doesn't provide
+bid/ask.
+
 ## Persistent state and the kill switch
 
 `risk/risk-state.ts` persists per-account state (`data/trading/<id>/_risk/risk-state.json`)
@@ -182,3 +190,5 @@ default.
 | Kill switch semantics | `risk/kill-switch.ts` + `risk-state.spec.ts` |
 | Deployment-safety gate | `risk/deployment-safety.ts` + this guide's "Deployment safety" section |
 | Auth on top of this (tokens/scopes) | [[docs/uta-auth.md]] (Fase 4b, ADR-0003) — a separate concern from the risk gate itself |
+| A new R21+ rule or independent audit job | [[docs/adr/0010-independent-audit.md]] (Fase 4c) + [[docs/trading-engine/BACKLOG.md]] for the full registry of registered-but-not-yet-implemented improvements |
+| Engine lease/fencing (a second Engine instance writing concurrently) | [[docs/adr/0009-engine-lease-fencing.md]] (Fase 7) — orthogonal to the R0–R20 chain, sits in the auth/identity layer |
