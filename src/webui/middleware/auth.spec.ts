@@ -45,6 +45,8 @@ function makeApp(opts: Parameters<typeof createAuthMiddleware>[0]) {
   app.use('*', createAuthMiddleware(opts))
   app.get('/api/trading/uta', (c) => c.json({ utas: [] }))
   app.post('/api/trading/uta/x/wallet/push', (c) => c.json({ ok: true }))
+  app.post('/api/simulator/uta/x/mark-price', (c) => c.json({ ok: true }))
+  app.put('/api/config/agent', (c) => c.json({ ok: true }))
   app.get('/api/version', (c) => c.json({ ok: true }))
   app.post('/api/version/check', (c) => c.json({ ok: true }))
   app.post('/api/auth/login', (c) => c.json({ ok: true }))
@@ -377,5 +379,59 @@ describe('auth middleware — bypass switch', () => {
     const app = makeApp({ trustedProxies: [], csrfTrustedOrigins: [], disabled: true })
     const res = await app.request('/api/trading/uta', undefined, envWithIp('203.0.113.5'))
     expect(res.status).toBe(200)
+  })
+})
+
+describe('auth middleware — Fase 4d (S1): requireSessionForSensitiveWrites', () => {
+  it('default (unset) preserves today\'s behavior — a loopback trading write bypasses auth with no session', async () => {
+    const app = makeApp({ trustedProxies: [], csrfTrustedOrigins: [] })
+    const res = await app.request('/api/trading/uta/x/wallet/push', { method: 'POST' }, envWithIp('127.0.0.1'))
+    expect(res.status).toBe(200)
+  })
+
+  it('true: a loopback trading write with no session is rejected — no more bypass for /api/trading', async () => {
+    const app = makeApp({ trustedProxies: [], csrfTrustedOrigins: [], requireSessionForSensitiveWrites: true })
+    const res = await app.request('/api/trading/uta/x/wallet/push', { method: 'POST' }, envWithIp('127.0.0.1'))
+    expect(res.status).toBe(401)
+  })
+
+  it('true: a loopback simulator write with no session is also rejected', async () => {
+    const app = makeApp({ trustedProxies: [], csrfTrustedOrigins: [], requireSessionForSensitiveWrites: true })
+    const res = await app.request('/api/simulator/uta/x/mark-price', { method: 'POST' }, envWithIp('127.0.0.1'))
+    expect(res.status).toBe(401)
+  })
+
+  it('true: a loopback agent-config write with no session is also rejected', async () => {
+    const app = makeApp({ trustedProxies: [], csrfTrustedOrigins: [], requireSessionForSensitiveWrites: true })
+    const res = await app.request('/api/config/agent', { method: 'PUT' }, envWithIp('127.0.0.1'))
+    expect(res.status).toBe(401)
+  })
+
+  it('true: a loopback trading write WITH a real session cookie still succeeds (the browser UI keeps working)', async () => {
+    const session = await createSession()
+    const app = makeApp({ trustedProxies: [], csrfTrustedOrigins: [], requireSessionForSensitiveWrites: true })
+    const res = await app.request('/api/trading/uta/x/wallet/push', {
+      method: 'POST',
+      headers: { cookie: `${SESSION_COOKIE_NAME}=${session.sid}` },
+    }, envWithIp('127.0.0.1'))
+    expect(res.status).toBe(200)
+  })
+
+  it('true: a loopback READ (GET) still bypasses auth with no session — only writes are affected', async () => {
+    const app = makeApp({ trustedProxies: [], csrfTrustedOrigins: [], requireSessionForSensitiveWrites: true })
+    const res = await app.request('/api/trading/uta', undefined, envWithIp('127.0.0.1'))
+    expect(res.status).toBe(200)
+  })
+
+  it('true: a loopback write OUTSIDE trading/simulator/config still bypasses auth (unaffected surface)', async () => {
+    const app = makeApp({ trustedProxies: [], csrfTrustedOrigins: [], requireSessionForSensitiveWrites: true })
+    const res = await app.request('/api/version/check', { method: 'POST' }, envWithIp('127.0.0.1'))
+    expect(res.status).toBe(200)
+  })
+
+  it('true: a non-loopback caller was already rejected before this option existed, and still is', async () => {
+    const app = makeApp({ trustedProxies: [], csrfTrustedOrigins: [], requireSessionForSensitiveWrites: true })
+    const res = await app.request('/api/trading/uta/x/wallet/push', { method: 'POST' }, envWithIp('203.0.113.5'))
+    expect(res.status).toBe(401)
   })
 })

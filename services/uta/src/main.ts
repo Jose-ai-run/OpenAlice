@@ -36,6 +36,7 @@ import { buildKeylessDataUTAs } from './domain/trading/keyless-data-sources.js'
 import { createTradingRoutes } from './http/routes-trading.js'
 import { createSimulatorRoutes } from './http/routes-simulator.js'
 import { utaAuthMiddleware } from './http/auth.js'
+import { engineAccountGuard } from './http/engine-account-guard.js'
 import { checkRiskEngineDeploymentSafety } from './domain/trading/risk/deployment-safety.js'
 import {
   checkUtaAuthDeploymentSafety,
@@ -223,6 +224,9 @@ export async function startUTAService(): Promise<void> {
   // mode (no OPENALICE_UTA_TOKENS_FILE); see http/auth.ts.
   app.use('/api/trading/*', utaAuthMiddleware(utaTokensPath))
   app.use('/api/simulator/*', utaAuthMiddleware(utaTokensPath))
+  // [PROPUESTA] Fase 4d (S1) — after auth, so it can read c.get('utaAuth').
+  // Only gates stage/commit on accounts the RO policy marks engineOwned.
+  app.use('/api/trading/*', engineAccountGuard())
 
   app.route('/api/trading', createTradingRoutes(tradingCtx))
   // Simulator endpoints — MockBroker-only god-view operations the

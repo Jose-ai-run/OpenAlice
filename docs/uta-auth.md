@@ -201,6 +201,68 @@ mode (UTA ignores the header either way, so this is safe regardless):
 - `services/engine/src/uta/uta-client.ts` — `EngineUtaClientOptions.token`,
   for the Engine's own credential once its runtime wires one in.
 
+## Closing the agent→Alice→UTA path (Fase 4d, S1)
+
+Before this, a local process with no Alice session at all — including an
+agent's own shell inside a Workspace — could reach Alice's `/api/trading/*`
+proxy, `/api/simulator/*`, or `/api/config/*` and have Alice's own
+session-cookie auth simply not apply, because
+`src/webui/middleware/auth.ts`'s loopback bypass trusted **any** loopback
+caller with no/trusted Origin, for every method, before the session check
+ever ran. Once past that bypass, the request rode Alice's own
+`approve`-scoped `OPENALICE_UTA_TOKEN` through the proxy straight to UTA.
+
+**Fix (`src/webui/middleware/auth.ts`, `AuthMiddlewareOptions.requireSessionForSensitiveWrites`):**
+a mutating request under `/api/trading`, `/api/simulator`, or
+`/api/config` no longer takes the loopback bypass — it falls through to
+the real session-cookie + CSRF check, even from loopback. Reads are
+unaffected. `src/webui/plugin.ts` passes `true` whenever a real TCP
+listener is bound (dev, browser, Docker — `config.listen !== false`)
+and `false` in Electron app mode, where `config.listen === false` and
+the only transport is Electron main's own IPC relay
+(`src/webui/web-ipc.ts`) — nothing external can dial into that at all,
+so there was never a shared-port attack surface there to close.
+
+**Verified NOT to break the two in-process approval paths**, which were
+never HTTP calls to Alice's own webui port in the first place — both
+call `UTAManagerSDK`/`UTAAccountSDK` directly, in-process, which in turn
+talks to UTA with Alice's own token the same way the proxy does, just
+without ever touching `src/webui/middleware/auth.ts`:
+- Telegram (`src/services/connector-client/uta-review.ts` — `uta.push(...)`).
+- The `tradingPush` AI tool (`src/tool/trading.ts` — `uta.push(...)`).
+
+Existing specs for both re-run unchanged and green as proof
+(`uta-review.spec.ts`, `trading.spec.ts`), confirming neither path was
+touched by this change.
+
+**UTA side — engine-owned accounts (`services/uta/src/http/engine-account-guard.ts`):**
+the RO risk policy can mark a specific account `engineOwned: true`
+(`domain/trading/risk/policy.ts`). On such an account, staging or
+committing requires the caller's token to carry the `engine` scope
+specifically — not merely any `stage`-scoped token (an `operator-cli`
+token, or Alice's own `read`+`stage`+`approve` token, both get 403
+`ENGINE_ACCOUNT_REQUIRES_ENGINE_SCOPE`). Push is not separately gated
+here: it still requires `approve` (unchanged), and since `TradingGit`
+allows only one pending commit at a time, whatever a human approves on
+an engine-owned account can only ever be the commit the Engine itself
+staged — "HUMAN_APPROVAL mode" falls out of the stage-gating plus that
+existing invariant, with no second mechanism needed to track "who
+created this pendingHash."
+
+**Residual risk, until Fase 10 (documented, not closed here):** Alice,
+UTA, and any Workspace agent still run as the **same OS user** on the
+same host. Nothing in this change stops a Workspace agent's shell from
+reading Alice's own files directly — its config, its session store, its
+sealed credentials file (still sealed, but the sealing key sits beside
+it on the same filesystem) — or from reading `OPENALICE_UTA_TOKEN` out
+of Alice's own environment if it can inspect Alice's process. This
+change closes the *HTTP* path (a local process can no longer forge an
+authenticated-looking request to Alice's trading surface without a real
+session); it does not, and cannot, close the *filesystem* path — that
+requires actual OS-level isolation (separate containers/users, read-only
+credential mounts) between Alice, UTA, and any Workspace's agent
+process, which is Fase 10's job, not this one's.
+
 ## Verification
 
 ```bash

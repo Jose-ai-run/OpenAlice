@@ -44,6 +44,14 @@ const accountRiskPolicySchema = z.object({
    *  (absent, bid===ask, or bid>ask) rejects by default, same as a
    *  missing quote — see rules/r21-max-spread.ts. */
   allowSyntheticQuotes: z.boolean().default(false),
+  /** [PROPUESTA] Fase 4d (S1) — marks this account as Engine-managed.
+   *  `http/engine-account-guard.ts` then requires the `engine` scope
+   *  specifically (not just any `stage`-scoped token) to stage or commit
+   *  on it — a human's `approve`-scoped push still works normally, and
+   *  can only ever approve the pendingHash the Engine itself created
+   *  (TradingGit allows only one pending commit at a time). Default
+   *  false: an ordinary account is unaffected. */
+  engineOwned: z.boolean().default(false),
 })
 export type AccountRiskPolicy = z.infer<typeof accountRiskPolicySchema>
 

@@ -23,6 +23,7 @@ export function makeAccountPolicy(overrides: Partial<AccountRiskPolicy> = {}): A
     requireStopLoss: true,
     maxQuoteAgeSeconds: 30,
     allowSyntheticQuotes: false,
+    engineOwned: false,
     ...overrides,
   }
 }

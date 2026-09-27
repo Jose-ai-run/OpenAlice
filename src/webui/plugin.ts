@@ -232,6 +232,12 @@ export class WebPlugin implements Plugin {
       trustedProxies,
       csrfTrustedOrigins,
       disabled: authDisabled,
+      // [PROPUESTA] Fase 4d (S1) — only meaningful when a real TCP socket
+      // is bound (dev/browser/Docker): that's the only topology where
+      // another local process (curl, a Workspace agent's shell) can
+      // reach this same port. Electron (`listen: false`, IPC-only
+      // transport — web-ipc.ts) keeps today's behavior unchanged.
+      requireSessionForSensitiveWrites: this.config.listen !== false,
     }))
 
     registerCliRoutes(app, {

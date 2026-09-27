@@ -1394,6 +1394,147 @@ archivos, 1150/1150 tests. `pnpm test:owner:uta` → 73/73, 1256/1256.
 
 ---
 
+## 16. Respaldo en el fork (A11) + Parte D (4d) — 2026-09-27
+
+### 16.1 Item 2 — `MEJORAS_DESDE_PHIL.md` — sigue sin aparecer
+
+Verificado por tercera vez esta sesión (`Test-Path`,
+`Get-ChildItem -Recurse` en `C:\AliceTrader\`, y además en
+`C:\Users\Jose\Downloads`/`Desktop`): **no existe en ningún lugar
+accesible**, a pesar de que el usuario indicó haberlo movido ahí. No
+copiado, nota de "no encontrado" NO retirada de `BACKLOG.md` —
+pendiente de confirmación real de la ruta.
+
+### 16.2 Item 3 — respaldo en el fork (A11) — bloqueado en Docker
+
+Sin `gitleaks` instalado; Docker Desktop no respondía
+(`failed to connect to the docker API at npipe:...`) al intentar
+`docker pull zricethezav/gitleaks`. Pregunté al usuario cómo prefería
+proceder (no descargué un binario de terceros sin su decisión
+explícita, no inventé un escáner "equivalente" sin que él eligiera esa
+opción) — eligió iniciar Docker Desktop él mismo. **A la hora de este
+commit, Docker sigue sin responder** (`docker info` → mismo error) —
+el escaneo de gitleaks y el push al fork quedan pendientes de que el
+usuario confirme que Docker está arriba. No se tocó ningún remoto ni
+se hizo ningún push en esta parada.
+
+### 16.3 Item 4 — Parte D (4d), S1: cerrar el camino agente → Alice → UTA
+
+**Verificación real de cada superficie antes de tocar nada** (código
+leído, no asumido):
+
+- **UI dev (Vite + relay) y navegador:** autentica hoy, en la práctica,
+  vía el mismo bypass de loopback que se está cerrando (Origin
+  `http://localhost:*` confiado por `isTrustedLocalOrigin`) — no hay un
+  flujo de login separado y distinto para dev. Al exigir sesión real
+  para escrituras sensibles, la UI sigue funcionando exactamente igual
+  siempre que exista una cookie de sesión válida (el flujo de login de
+  Alice ya existe end-to-end, `src/services/auth/`, `/api/auth/login`)
+  — no se inventó nada nuevo, solo dejó de bypasearse para estas rutas.
+- **Electron (`app://` + IPC):** `src/webui/web-ipc.ts` — confirmado
+  leyendo el código que sintetiza `remoteAddress: '127.0.0.1'` para
+  "mirror loopback HTTP semantics", y que `WebPlugin` (`plugin.ts:414`)
+  **nunca llama `serve()`** cuando `config.listen === false` (modo
+  Electron) — no hay socket TCP real escuchando en absoluto en ese
+  modo, así que ningún proceso externo puede compartir ese puerto con
+  la app. Por eso `requireSessionForSensitiveWrites` se pasa `false`
+  ahí — el bypass de loopback en Electron no protege nada que un
+  atacante externo pudiera alcanzar, porque no hay nada que alcanzar.
+- **Telegram:** `src/services/connector-client/uta-review.ts` llama
+  `uta.push(request.pendingHash)` directamente sobre el objeto
+  `UTAAccountSDK` — in-process, nunca via HTTP contra el propio puerto
+  web de Alice. No pasa por `auth.ts` en absoluto.
+- **`/cli` (workspace CLI shims):** confirmado que
+  `registerCliRoutes(app, {...}, true)` en `plugin.ts` (con
+  `manifestOnly=true`) **nunca registra** `POST /cli/:wsId/:export/invoke`
+  (retorna antes, `server/cli.ts:287`) — el invoke real, sin auth por
+  diseño ("no admin-token gate — the workspace CLI carries no secret"),
+  solo se monta vía `LocalToolGatewayPlugin` (puerto MCP separado,
+  loopback-only) o, si `OPENALICE_LOCAL_CLI_ON_WEB=1`, vía
+  `mountLocalToolGateway` **antes** de `app.use('*', createAuthMiddleware(...))`
+  en el propio `plugin.ts` — deliberadamente por encima del gate de
+  auth, con un `bindIsPublic` que rechaza arrancar si ese modo se
+  combina con un bind no-loopback. Fuera del alcance de S1 tal como el
+  usuario lo definió (rutas de trading/simulator/config, no el CLI
+  gateway) — **registrado como riesgo conocido, no cerrado en esta
+  ronda** (ver `docs/uta-auth.md`, sección de riesgo residual).
+- **`tradingPush` (tool de IA):** `src/tool/trading.ts:840` —
+  `uta.push(status.pendingHash)`, mismo patrón in-process que Telegram,
+  nunca HTTP contra el propio puerto de Alice.
+
+**Cambios:**
+- `src/webui/middleware/auth.ts` — `AuthMiddlewareOptions.requireSessionForSensitiveWrites`:
+  el bypass de loopback ya no aplica a una escritura bajo
+  `/api/trading`, `/api/simulator`, o `/api/config` cuando está
+  activado; las lecturas no cambian. `plugin.ts` lo activa exactamente
+  cuando hay un socket TCP real (`config.listen !== false`).
+- `services/uta/src/http/engine-account-guard.ts` (nuevo) — cuentas
+  marcadas `engineOwned: true` en la política RO (`policy.ts`, campo
+  nuevo) exigen scope `engine` específicamente para `stage`/`commit`;
+  `push` sigue exigiendo `approve` sin cambios, y como `TradingGit`
+  solo admite un commit pendiente a la vez, lo que un humano aprueba en
+  una cuenta del Engine solo puede ser lo que el propio Engine generó —
+  sin mecanismo aparte para rastrear "quién creó este pendingHash".
+
+Salida real (`auth.spec.ts`, suite nueva "Fase 4d (S1)"):
+
+```
+✓ default (unset) preserves today's behavior — a loopback trading write bypasses auth with no session
+✓ true: a loopback trading write with no session is rejected — no more bypass for /api/trading
+✓ true: a loopback simulator write with no session is also rejected
+✓ true: a loopback agent-config write with no session is also rejected
+✓ true: a loopback trading write WITH a real session cookie still succeeds (the browser UI keeps working)
+✓ true: a loopback READ (GET) still bypasses auth with no session — only writes are affected
+✓ true: a loopback write OUTSIDE trading/simulator/config still bypasses auth (unaffected surface)
+✓ true: a non-loopback caller was already rejected before this option existed, and still is
+```
+
+Salida real (`engine-account-guard.spec.ts`, 10/10):
+
+```
+✓ compatibility mode (no tokens file) — no-ops entirely, no utaAuth to check
+✓ account not marked engineOwned — a stage-only token (no engine scope) still works, unaffected
+✓ engineOwned account rejects a stage-scoped token that lacks the engine scope specifically
+✓ engineOwned account allows a token that DOES carry the engine scope
+✓ engineOwned account still allows commit only from an engine-scoped token too
+✓ an engineOwned account rejects staging with Alice's own token shape (read+stage+approve, never engine)
+✓ does not gate non-stage routes on an engineOwned account (e.g. reads) — only stage/commit
+✓ push is never gated by this guard — a human's approve-scoped token (Alice, never engine) can still push on an engineOwned account
+✓ falls back to "default" account policy the same way the RiskEngine does
+✓ no risk policy configured at all — no-ops (RiskEngine's own gates handle that separately)
+```
+
+Confirmado sin romper las dos superficies in-process, corriendo sus
+specs existentes sin ningún cambio (prueba de que este trabajo no las
+tocó): `src/services/connector-client/uta-review.spec.ts` y
+`src/tool/trading.spec.ts` → 28/28 tests, verde.
+
+**Riesgo residual documentado, no cerrado** (`docs/uta-auth.md`): Alice,
+UTA, y cualquier agente de un Workspace siguen siendo el mismo usuario
+del SO — un agente con shell puede leer los archivos de Alice
+directamente (incluido `OPENALICE_UTA_TOKEN` si puede inspeccionar el
+proceso). Este cambio cierra el camino HTTP; el aislamiento real de
+sistema de archivos/proceso es trabajo de Fase 10 (contenedores,
+montajes RO), no de esta ronda.
+
+### 16.4 Resultado final
+
+```
+npx tsc --noEmit (raíz)                     # limpio
+npx vitest run src/webui/middleware/auth.spec.ts   # 45/45 (37 preexistentes + 8 nuevos)
+npx vitest run src/webui                            # 31/34 archivos, 416/419 tests — 3 fallos preexistentes,
+                                                       #   sin relación (mismo hallazgo ya documentado en Fase 4b)
+npx vitest run src/services/connector-client/uta-review.spec.ts src/tool/trading.spec.ts
+                                                     # 28/28 — Telegram y tradingPush sin cambios
+cd services/uta && pnpm typecheck                   # limpio
+node scripts/run-tests.mjs --owner uta               # 74/74 archivos, 1266/1266 tests
+pnpm test:integration:uta                            # 1/1, 15/15
+cd services/uta && pnpm build                        # limpio (350.04 KB)
+corepack pnpm exec tsup src/main.ts --format esm --dts   # limpio (warning preexistente, direct-eval, no relacionado)
+```
+
+---
+
 ## Resumen de la línea de tiempo de esta sesión
 
 - Herramientas verificadas: git 2.49.0, Node v24.12.0, pnpm 11.7.0 (vía `corepack pnpm`).

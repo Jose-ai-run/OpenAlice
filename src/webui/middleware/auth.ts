@@ -9,6 +9,12 @@
  *                          configured. Carefully NOT spoofable through
  *                          X-Forwarded-For unless an explicit trusted
  *                          proxy IP is in `OPENALICE_TRUSTED_PROXIES`.
+ *                          [PROPUESTA] Fase 4d (S1): does NOT apply to a
+ *                          mutating request under /api/trading,
+ *                          /api/simulator, or /api/config when
+ *                          `requireSessionForSensitiveWrites` is set
+ *                          (real TCP listener bound) — see that option's
+ *                          docstring below.
  *   3. Session cookie    — looked up in sessions.json, expiry checked,
  *                          window slid forward on use.
  *   4. CSRF Origin check — mutating methods (POST/PUT/DELETE/PATCH) must
@@ -42,6 +48,23 @@ const PUBLIC_PATH_PREFIX = [
 
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'DELETE', 'PATCH'])
 
+/**
+ * [PROPUESTA] Fase 4d (S1) — path prefixes where a mutating request must
+ * never ride the loopback/trusted-origin bypass, only the real session +
+ * CSRF check below. Trading writes (place/modify/cancel/close, push,
+ * stage, simulator mutations) and config writes (broker accounts, agent
+ * settings incl. `allowAiTrading`) are the surfaces a local process with
+ * no legitimate session — including an agent's shell inside a
+ * Workspace — could otherwise reach with zero authentication, per the
+ * loopback bypass's original "any local caller is trusted" model. Reads
+ * under these same prefixes are unaffected (only mutating methods match).
+ */
+const SENSITIVE_WRITE_PATH_PREFIXES = ['/api/trading', '/api/simulator', '/api/config'] as const
+
+function isSensitiveWrite(method: string, path: string): boolean {
+  return MUTATING_METHODS.has(method) && SENSITIVE_WRITE_PATH_PREFIXES.some((p) => path.startsWith(p))
+}
+
 export interface AuthMiddlewareOptions {
   /** Trusted proxy IPs (e.g., ["10.0.0.5"]). Empty = no trusted proxy. */
   trustedProxies: string[]
@@ -49,6 +72,27 @@ export interface AuthMiddlewareOptions {
   csrfTrustedOrigins: string[]
   /** Set true to disable auth (dev / test). Default false. */
   disabled?: boolean
+  /**
+   * [PROPUESTA] Fase 4d (S1) — when true, the loopback/trusted-origin
+   * bypass (step 2 below) never applies to a mutating request under
+   * `/api/trading`, `/api/simulator`, or `/api/config` — those fall
+   * through to the real session-cookie + CSRF check even from loopback.
+   *
+   * `WebPlugin` passes `true` whenever a real TCP listener is bound
+   * (dev/`pnpm dev`, browser, Docker) — anything reachable on that port
+   * is reachable by any other local process too, including a Workspace
+   * agent's own shell (`curl localhost:PORT/api/trading/...`), which the
+   * unconditional bypass could not distinguish from the real browser
+   * tab. It passes `false` in Electron app mode (`config.listen ===
+   * false`, see `web-ipc.ts`): that mode never binds a TCP socket at
+   * all — the sole transport is Electron main's own IPC relay, which no
+   * other local process can reach — so the bypass staying exactly as it
+   * was there changes nothing about what an attacker can do. Optional,
+   * default `false` (today's behavior) — the one production caller
+   * (`WebPlugin`) always passes it explicitly; defaulting to `false`
+   * only affects tests/callers that don't care about this axis.
+   */
+  requireSessionForSensitiveWrites?: boolean
 }
 
 export function createAuthMiddleware(opts: AuthMiddlewareOptions): MiddlewareHandler {
@@ -77,9 +121,10 @@ export function createAuthMiddleware(opts: AuthMiddlewareOptions): MiddlewareHan
     // from Alice's view, so trusting "localhost requests" would let every
     // public request through. See safe/playbooks/03-localhost-spoofing.md.
     if (trustedProxies.size === 0) {
+      const bypassEligible = !(opts.requireSessionForSensitiveWrites && isSensitiveWrite(c.req.method, path))
       const clientIp = getSocketRemoteAddress(c)
       const origin = c.req.header('origin')
-      if (clientIp && isLoopbackIp(clientIp) && (!origin || isTrustedLocalOrigin(origin))) {
+      if (bypassEligible && clientIp && isLoopbackIp(clientIp) && (!origin || isTrustedLocalOrigin(origin))) {
         return next()
       }
     }
