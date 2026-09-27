@@ -1179,6 +1179,195 @@ la ruta real o lo vuelva a adjuntar.
 
 ---
 
+## 14. Hito 1 (parte 1) — SIGNAL_ONLY con datos reales (`feat/engine-hito1-signal-only`) — 2026-09-27
+
+Alcance de esta parada (items 1–4 del Hito 1; items 5–7 y la aceptación
+de 24h **no** empiezan hasta aprobar esto): scheduler alineado a velas,
+journal SQLite con migraciones, configuración real con aliceIds
+verificados contra Bybit en vivo, y 3 ciclos SIGNAL_ONLY reales.
+
+**Aclaración pedida y respondida antes de empezar:** para "3 ciclos
+reales" el usuario confirmó (pregunta explícita, respuesta elegida:
+"Datos reales, sin esperar 3h") que no hace falta bloquear 3 horas de
+reloj real — el scheduler queda correcto y probado con reloj inyectable,
+y la evidencia de los 3 ciclos se genera procesando las últimas 3 velas
+de 1h ya cerradas con datos 100% reales de Bybit.
+
+### 14.1 Verificación de red y de entorno antes de construir nada
+
+- `curl https://api.bybit.com/v5/market/time` y `.../instruments-info` —
+  conectividad real confirmada desde este entorno antes de asumir que
+  el resto del Hito era viable.
+- `node -e "require('node:sqlite')..."` — funciona en el Node instalado
+  (v24.12.0), con el warning esperado `ExperimentalWarning: SQLite is
+  an experimental feature`. ADR-0002 pedía `>=24.15.0` para la
+  estabilidad "1.2 Release candidate" en producción; para un demo local
+  como este Hito, la versión instalada es suficiente — la brecha con
+  la recomendación de ADR-0002 sigue pendiente para Fase 10, no de este
+  Hito.
+
+### 14.2 Levantar UTA en vivo — dos hallazgos reales de entorno
+
+Para obtener aliceIds reales (no inventados) hubo que levantar UTA de
+verdad, fuera de `pnpm dev`/Guardian (que no está disponible en este
+flujo de trabajo). Dos problemas reales encontrados y resueltos, no
+ocultados:
+
+1. `node dist/uta.js` y `tsx src/main.ts` fallan con
+   `ERR_MODULE_NOT_FOUND` sobre `@traderalice/guardian-runtime/dist/index.js`
+   — ese paquete no estaba construido. `packages/ibkr` y
+   `@traderalice/uta-protocol` ya tenían este mismo problema documentado
+   en la Fase 4b (AUDIT.md §10.3); `guardian-runtime` es un caso más del
+   mismo hallazgo (dependencias de workspace no construidas). Resuelto
+   construyéndolo (`cd packages/guardian-runtime && pnpm build`).
+2. Con `tsx` + `--conditions=openalice-source` (la condición real que
+   `scripts/guardian/dev.ts:265` usa), el broker CCXT seguía sin cargar:
+   `workspacePacksAllowed()` (`registry.ts:131-136`) exige
+   `OPENALICE_LAUNCHER === 'dev'`, que Guardian fija automáticamente y
+   que no existe fuera de él. Con `OPENALICE_LAUNCHER=dev` puesto a
+   mano, `loadWorkspacePack()` (`registry.ts:109-116`) todavía resolvía
+   mal la ruta porque `pnpm --filter ... exec` cambia el cwd del proceso
+   hijo al paquete filtrado (`services/uta`), y `appResourcesHome`
+   (`@/core/paths.ts`) cae a `process.cwd()` cuando `OPENALICE_APP_HOME`
+   no está seteado — resultando en una ruta `services/uta/packages/...`
+   en vez de `packages/...` desde la raíz. Resuelto fijando
+   `OPENALICE_APP_HOME` explícitamente a la raíz del repo. Con los tres
+   env vars (`OPENALICE_LAUNCHER=dev`, `OPENALICE_APP_HOME=<raíz>`,
+   `NODE_OPTIONS=--conditions=openalice-source`) UTA arrancó limpio,
+   `bybit-readonly` conectado con 1447 mercados reales.
+
+Ninguno de los dos es un bug de este Hito — son gaps reales del camino
+"correr UTA fuera de Guardian", que hasta ahora nadie había necesitado
+documentar porque todo el trabajo previo de esta sesión usaba
+`vitest`/tests (que sí resuelven el workspace correctamente vía
+`scripts/run-tests.mjs`), nunca un proceso UTA vivo standalone.
+
+### 14.3 AliceIds reales — verificados por búsqueda de contratos, no inventados
+
+`GET /api/trading/contracts/search?pattern=BTC&source=bybit-readonly&assetClass=crypto`
+(y lo mismo para ETH) contra el UTA real, en vivo:
+
+```
+bybit-readonly|BTC/USDT:USDT   — "BTC/USDT swap (USDT settled)", CRYPTO_PERP
+bybit-readonly|ETH/USDT:USDT   — "ETH/USDT swap (USDT settled)", CRYPTO_PERP
+```
+
+Elegidos entre los resultados reales (18 para BTC, 23 para ETH,
+incluyendo spot/futuros con vencimiento/otros pares) por ser el
+perpetuo USDT — el instrumento más líquido y el uso estándar para una
+estrategia de trend-following cripto. Confirmado que
+`POST /api/trading/uta/bybit-readonly/historical` devuelve velas 1h
+reales para ambos (BTC ~$84,850, ETH ~$2,685 al momento de esta
+verificación — precios de mercado real, no simulados).
+
+### 14.4 Componentes construidos
+
+- `services/engine/src/clock/` — `Clock` inyectable, aritmética de
+  límites de vela (`candle-boundaries.ts`), y el scheduler
+  (`scheduler.ts`): sin reentrada **por construcción** (el siguiente
+  timer solo se programa dentro del `.finally()` del ciclo anterior —
+  no por un guard sobre un estado `running`, que hubiera sido código
+  muerto dado cómo se programa el siguiente tick; ver el propio
+  docstring del archivo). `onSkippedOverlap` reporta los límites
+  realmente saltados cuando un ciclo lento cruza más de una vela real.
+- `services/engine/src/db/` — `node:sqlite`, migraciones numeradas e
+  idempotentes con rollback en transacción. Migración 0001: `cycles`,
+  `decisions`, `order_intents`, `order_events` (las últimas dos con
+  esquema completo desde ya, aunque nada escribe en ellas hasta el modo
+  PAPER — ítem 5, no de esta parada).
+- `services/engine/src/journal/journal.ts` — capa tipada sobre las
+  tablas; toda decisión (incluidas `NONE` con `reasonCodes`) se
+  persiste antes de que la función retorne.
+- `services/engine/src/config/engine-config.ts` +
+  `engine-config.example.json` — Zod schema real, config real con los
+  aliceIds verificados en 14.3, estrategia `trend-following`, intervalo
+  `1h`.
+- `services/engine/src/loop/run-cycle.ts` — la única función que tanto
+  el scheduler real como el replay de evidencia llaman: fetch (vía
+  `MarketDataStore`, ya existente de Fase 2) → `buildStrategyContext`
+  (no-lookahead, ya existente de la corrección de Fase 3) → `strategy.evaluate()`
+  → journal. Mismo camino de código, no una versión de juguete para la demo.
+- `services/engine/src/cli/signal-only-replay.ts` — el driver que
+  genera la evidencia de este gate, reutilizando `runCycle()` sin
+  ninguna lógica de decisión propia.
+
+### 14.5 Salida real — tests
+
+```
+cd services/engine && pnpm typecheck    # limpio
+cd services/engine && pnpm test         # 25/25 archivos, 111/111 tests (antes de este Hito: 19/83)
+cd services/engine && pnpm build        # limpio (dist/engine.cjs 105.09 KB — sin cambios, src/main.ts todavía no integra el loop)
+```
+
+Incluye una prueba que atrapó un error real de mi propio test (no del
+código): asumí que `Bar.timestamp` era el cierre de la vela; es la
+**apertura** — una vela 1h abierta a las 14:00 cierra a las 15:00, no a
+las 14:00. El test `run-cycle.spec.ts`'s "never includes a bar after
+closeAt" tenía la aserción equivocada hasta corregirla; `buildStrategyContext`
+(código de producción) ya se comportaba bien desde el principio.
+
+### 14.6 Salida real — 3 ciclos SIGNAL_ONLY contra datos reales de Bybit
+
+```
+$ corepack pnpm exec tsx src/cli/signal-only-replay.ts
+
+[replay] config=.../engine-config.example.json
+[replay] db=.../services/engine/data/signal-only-replay.db
+[replay] uta=http://127.0.0.1:47333
+[replay] strategy=trend-following@0.1.0 interval=1h universe=BTC/USDT perp (Bybit), ETH/USDT perp (Bybit)
+[replay] real closed boundaries to evaluate: 2026-09-27T15:00:00.000Z, 2026-09-27T16:00:00.000Z, 2026-09-27T17:00:00.000Z
+
+=== cycle_id=1 closeAt=2026-09-27T15:00:00.000Z ===
+  BTC/USDT perp (Bybit)  bars=119  NONE reasons=(none)
+  ETH/USDT perp (Bybit)  bars=119  NONE reasons=(none)
+
+=== cycle_id=2 closeAt=2026-09-27T16:00:00.000Z ===
+  BTC/USDT perp (Bybit)  bars=119  NONE reasons=(none)
+  ETH/USDT perp (Bybit)  bars=119  NONE reasons=(none)
+
+=== cycle_id=3 closeAt=2026-09-27T17:00:00.000Z ===
+  BTC/USDT perp (Bybit)  bars=119  NONE reasons=(none)
+  ETH/USDT perp (Bybit)  bars=119  NONE reasons=(none)
+
+[replay] done — 3 real cycles recorded in .../services/engine/data/signal-only-replay.db
+```
+
+Las 6 decisiones son `NONE` — el cruce SMA rápida/lenta de
+trend-following genuinamente no se disparó en esta ventana real de
+mercado. No se fabricó un `ENTER` para que la demo se viera "más
+interesante" — este es el resultado real.
+
+Verificado además leyendo la base SQLite directamente (no solo la
+salida de consola), consultando el archivo `.db` real con
+`node:sqlite`:
+
+```
+cycles:    3 filas, las tres status='completed', candle_close_at = 15:00/16:00/17:00 UTC
+decisions: 6 filas (2 símbolos × 3 ciclos), todas kind='NONE'
+```
+
+### 14.7 Pendiente antes de la aceptación completa del Hito 1
+
+Esta parada cubre items 1–4 únicamente, como se pidió. **No hecho
+todavía** (items 5–7 y la aceptación de 24h del Hito 1): PriceFeeder +
+ExecutionManager en modo PAPER contra `engine-paper`, la página de
+estado de solo lectura en 47340, `docs/trading-engine/DEMO-LOCAL.md`, y
+las 24 horas seguidas sin intervención. El archivo de base de datos de
+esta evidencia (`services/engine/data/signal-only-replay.db`) es un
+artefacto de demo, no versionado (`.gitignore` actualizado con
+`services/engine/data/`) — item 7 más adelante decidirá la ruta real
+bajo `OPENALICE_HOME` para el journal de producción, consistente con
+el resto de la app (`dataPath()`), en vez del path local usado aquí
+solo para esta evidencia.
+
+UTA quedó corriendo en segundo plano durante esta verificación
+(`tsx src/main.ts` con los env vars de 14.2) — se detiene al terminar
+esta parada; el comando exacto para volver a levantarlo (para cuando
+continúe el Hito 1) queda pendiente de documentar en
+`docs/trading-engine/DEMO-LOCAL.md` (item 7).
+
+---
+
 ## Resumen de la línea de tiempo de esta sesión
 
 - Herramientas verificadas: git 2.49.0, Node v24.12.0, pnpm 11.7.0 (vía `corepack pnpm`).

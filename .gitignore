@@ -2,6 +2,7 @@ node_modules/
 dist/
 logs/
 /data/*
+services/engine/data/
 state.json
 *.log
 
