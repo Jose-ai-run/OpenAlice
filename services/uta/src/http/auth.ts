@@ -43,6 +43,13 @@ const SCOPE_RULES: ReadonlyArray<{ test: (method: string, path: string) => boole
     test: (_m, path) => /\/(quote|historical|contracts\/details|contract\/(option-contracts|option-chain|order-book|expand))$/.test(path),
     scope: 'read',
   },
+  // Fase 4b corrección 2026-09-27 (item 2): /sync writes a new commit
+  // reflecting fill/cancel status changes (UnifiedTradingAccount.sync()
+  // -> `this.git.sync(updates, state)`, [VERIFICADO EN REPOSITORIO]) — a
+  // real state write, not a plain read. 'stage' is the correct minimum,
+  // not the 'operator' fallback, so an engine-scoped token (read+stage
+  // only) can legitimately call it.
+  { test: (_m, path) => /\/uta\/[^/]+\/sync$/.test(path), scope: 'stage' },
   { test: (_m, path) => /\/wallet\/stage-(place-order|modify-order|close-position|cancel-order)$/.test(path), scope: 'stage' },
   { test: (_m, path) => /\/wallet\/(commit|reject)$/.test(path), scope: 'stage' },
   { test: (_m, path) => /\/wallet\/(push|place-order|close-position|cancel-order)$/.test(path), scope: 'approve' },

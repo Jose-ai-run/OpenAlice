@@ -74,8 +74,22 @@ export interface ITradingGit {
   simulatePriceChange(priceChanges: PriceChangeInput[]): Promise<SimulatePriceChangeResult>
 }
 
+/**
+ * [PROPUESTA] Fase 4c corrección item 4 (2026-09-27) — the commit hash and
+ * within-commit position are both already known and fixed by the time
+ * `executeOperation` runs (computed at `commit()`, before `push()` ever
+ * calls it — see `TradingGit.executePush()`). Threading them through lets
+ * the RiskEngine log an unambiguous correlation key
+ * (`RiskDecisionLogEntry.pendingHash` + `operationIndex`) instead of the
+ * independent-audit job (ADR-0010) having to fuzzy-match by timestamp.
+ */
+export interface OperationExecutionContext {
+  commitHash: CommitHash
+  operationIndex: number
+}
+
 export interface TradingGitConfig {
-  executeOperation: (operation: Operation) => Promise<unknown>
+  executeOperation: (operation: Operation, ctx?: OperationExecutionContext) => Promise<unknown>
   getGitState: () => Promise<GitState>
   onCommit?: (state: GitExportState) => void | Promise<void>
 }

@@ -42,7 +42,9 @@ const TRADING_EXPECTATIONS: Record<string, UtaScope> = {
   'GET /fx-rates': 'read',
   'POST /test-connection': 'operator',
   'POST /uta/:id/reconnect': 'operator',
-  'POST /uta/:id/sync': 'operator',
+  // 'stage', not 'operator' — this writes a real commit (fill/cancel
+  // status sync), see auth.ts's comment. Fase 4b corrección item 2.
+  'POST /uta/:id/sync': 'stage',
   'POST /uta/:id/simulate-price': 'operator',
   'GET /uta/:id/subaccounts': 'read',
   'GET /uta/:id/account': 'read',

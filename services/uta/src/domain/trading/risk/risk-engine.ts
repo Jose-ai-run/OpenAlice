@@ -16,6 +16,7 @@
 import Decimal from 'decimal.js'
 import type { IBroker } from '../brokers/types.js'
 import type { Operation } from '../git/types.js'
+import type { OperationExecutionContext } from '../git/interfaces.js'
 import { loadRiskPolicy, resolveAccountPolicy, resolveRiskPolicyPath } from './policy.js'
 import { loadRiskStateStrict, saveRiskState, currentDayKey, type RiskState } from './risk-state.js'
 import { triggerKillSwitch } from './kill-switch.js'
@@ -59,6 +60,16 @@ export interface RiskEngineDeps {
   now?: () => Date
   /** Injectable for hermetic tests — bypasses the real /etc/openalice path. */
   policyPath?: string
+  /**
+   * [PROPUESTA] Fase 4c corrección item 4 — the commit hash and
+   * within-commit position this operation belongs to, threaded down from
+   * `TradingGit.executePush()` via `risk-dispatcher.ts`. Logged verbatim
+   * into `risk-decisions.jsonl` so the independent audit (ADR-0010) can
+   * join a decision to its resulting commit without ambiguity. Absent
+   * only when a test calls `evaluateRisk` directly, bypassing the real
+   * push path.
+   */
+  correlation?: OperationExecutionContext
 }
 
 function haltVerdict(reason: string, policyHash = ''): RiskVerdict {
@@ -72,24 +83,25 @@ export async function evaluateRisk(operation: Operation, deps: RiskEngineDeps): 
 
   const now = (deps.now ?? (() => new Date()))()
   const accountId = deps.accountId
+  const correlation = deps.correlation
 
   const policyResult = await loadRiskPolicy(deps.policyPath ?? resolveRiskPolicyPath())
   if (!policyResult.ok) {
-    return await finalize(accountId, operation, haltVerdict(`risk policy unavailable: ${policyResult.reason}`), now, undefined)
+    return await finalize(accountId, operation, haltVerdict(`risk policy unavailable: ${policyResult.reason}`), now, undefined, correlation)
   }
   const accountPolicy = resolveAccountPolicy(policyResult.policy, accountId)
   if (!accountPolicy) {
     return await finalize(
       accountId, operation,
       haltVerdict(`no risk policy entry for account "${accountId}" (and no "default")`, policyResult.policyHash),
-      now, undefined,
+      now, undefined, correlation,
     )
   }
   const policyHash = policyResult.policyHash
 
   const stateResult = await loadRiskStateStrict(accountId, currentDayKey(now))
   if (!stateResult.ok) {
-    return await finalize(accountId, operation, haltVerdict(stateResult.reason, policyHash), now, undefined)
+    return await finalize(accountId, operation, haltVerdict(stateResult.reason, policyHash), now, undefined, correlation)
   }
   let state: RiskState = stateResult.state
 
@@ -100,7 +112,7 @@ export async function evaluateRisk(operation: Operation, deps: RiskEngineDeps): 
     return await finalize(
       accountId, operation,
       haltVerdict(`could not read account/positions: ${err instanceof Error ? err.message : String(err)}`, policyHash),
-      now, state,
+      now, state, correlation,
     )
   }
 
@@ -146,11 +158,11 @@ export async function evaluateRisk(operation: Operation, deps: RiskEngineDeps): 
         allowed: false, ruleCode: rejection.code, reason: rejection.message,
         policyHash, killSwitch: rejection.killSwitch ?? state.killSwitch,
       }
-      return await finalizeRejected(accountId, operation, verdict, now, state, rejection.killSwitch)
+      return await finalizeRejected(accountId, operation, verdict, now, state, rejection.killSwitch, correlation)
     }
   }
 
-  return await finalizeAllowed(accountId, operation, { allowed: true, policyHash, killSwitch: state.killSwitch }, now, state, accountPolicy)
+  return await finalizeAllowed(accountId, operation, { allowed: true, policyHash, killSwitch: state.killSwitch }, now, state, accountPolicy, correlation)
 }
 
 /**
@@ -173,6 +185,7 @@ export async function evaluateRisk(operation: Operation, deps: RiskEngineDeps): 
  */
 async function persistOrForceHalt(
   accountId: string, state: RiskState, operation: Operation, now: Date, policyHash: string,
+  correlation: OperationExecutionContext | undefined,
 ): Promise<RiskVerdict | null> {
   try {
     await saveRiskState(accountId, state)
@@ -190,39 +203,44 @@ async function persistOrForceHalt(
       killSwitchSetAt: now.toISOString(),
     }).catch(() => { /* best-effort only — already logged above */ })
     const verdict: RiskVerdict = { allowed: false, ruleCode: 'STATE_WRITE_FAILURE', reason: message, policyHash, killSwitch: 'HALT_NEW' }
-    await appendRiskDecision(accountId, toLogEntry(accountId, operation, verdict, now)).catch(() => { /* best-effort */ })
+    await appendRiskDecision(accountId, toLogEntry(accountId, operation, verdict, now, correlation)).catch(() => { /* best-effort */ })
     return verdict
   }
 }
 
-async function finalize(accountId: string, operation: Operation, verdict: RiskVerdict, now: Date, state: RiskState | undefined): Promise<RiskVerdict> {
+async function finalize(
+  accountId: string, operation: Operation, verdict: RiskVerdict, now: Date, state: RiskState | undefined,
+  correlation: OperationExecutionContext | undefined,
+): Promise<RiskVerdict> {
   if (state) {
-    const forced = await persistOrForceHalt(accountId, state, operation, now, verdict.policyHash)
+    const forced = await persistOrForceHalt(accountId, state, operation, now, verdict.policyHash, correlation)
     if (forced) return forced
   }
-  await appendRiskDecision(accountId, toLogEntry(accountId, operation, verdict, now)).catch(() => { /* logging must never block a verdict */ })
+  await appendRiskDecision(accountId, toLogEntry(accountId, operation, verdict, now, correlation)).catch(() => { /* logging must never block a verdict */ })
   return verdict
 }
 
 async function finalizeRejected(
   accountId: string, operation: Operation, verdict: RiskVerdict, now: Date,
-  state: RiskState, killSwitchTrigger?: 'HALT_NEW' | 'FLATTEN',
+  state: RiskState, killSwitchTrigger: 'HALT_NEW' | 'FLATTEN' | undefined,
+  correlation: OperationExecutionContext | undefined,
 ): Promise<RiskVerdict> {
   let next = { ...state, consecutiveRejects: state.consecutiveRejects + 1 }
   if (killSwitchTrigger) {
     next = await triggerKillSwitch(accountId, killSwitchTrigger, `${verdict.ruleCode}: ${verdict.reason}`, now)
     verdict = { ...verdict, killSwitch: next.killSwitch }
   } else {
-    const forced = await persistOrForceHalt(accountId, next, operation, now, verdict.policyHash)
+    const forced = await persistOrForceHalt(accountId, next, operation, now, verdict.policyHash, correlation)
     if (forced) return forced
   }
-  await appendRiskDecision(accountId, toLogEntry(accountId, operation, verdict, now)).catch(() => {})
+  await appendRiskDecision(accountId, toLogEntry(accountId, operation, verdict, now, correlation)).catch(() => {})
   return verdict
 }
 
 async function finalizeAllowed(
   accountId: string, operation: Operation, verdict: RiskVerdict, now: Date,
   state: RiskState, accountPolicy: RiskContext['policy'],
+  correlation: OperationExecutionContext | undefined,
 ): Promise<RiskVerdict> {
   let next = { ...state, consecutiveRejects: 0 }
   if (operation.action === 'placeOrder') {
@@ -239,8 +257,8 @@ async function finalizeAllowed(
       }
     }
   }
-  const forced = await persistOrForceHalt(accountId, next, operation, now, verdict.policyHash)
+  const forced = await persistOrForceHalt(accountId, next, operation, now, verdict.policyHash, correlation)
   if (forced) return forced
-  await appendRiskDecision(accountId, toLogEntry(accountId, operation, verdict, now)).catch(() => {})
+  await appendRiskDecision(accountId, toLogEntry(accountId, operation, verdict, now, correlation)).catch(() => {})
   return verdict
 }

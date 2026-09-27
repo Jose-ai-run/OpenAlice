@@ -140,9 +140,10 @@ export class TradingGit implements ITradingGit {
 
     // Execute all operations
     const results: OperationResult[] = []
-    for (const op of operations) {
+    for (let operationIndex = 0; operationIndex < operations.length; operationIndex++) {
+      const op = operations[operationIndex]!
       try {
-        const raw = await this.config.executeOperation(op)
+        const raw = await this.config.executeOperation(op, { commitHash: hash, operationIndex })
         results.push(this.parseOperationResult(op, raw))
       } catch (error) {
         results.push({

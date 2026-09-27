@@ -123,10 +123,38 @@ it.
 | Scope | Routes |
 |---|---|
 | `read` | Every `GET` under `/api/trading/*`, plus the read-only `POST` routes that just happen to carry a JSON body (`quote`, `historical`, `contracts/details`, `contract/option-*`, `contract/order-book`, `contract/expand`) |
-| `stage` | `POST .../wallet/stage-place-order`, `stage-modify-order`, `stage-close-position`, `stage-cancel-order`, `commit`, `reject` |
+| `stage` | `POST .../wallet/stage-place-order`, `stage-modify-order`, `stage-close-position`, `stage-cancel-order`, `commit`, `reject`, and `.../uta/:id/sync` (writes a real commit — see below) |
 | `approve` | `POST .../wallet/push`, `place-order`, `close-position`, `cancel-order` (the one-shot stage→commit→push routes) |
-| `operator` | Everything else under `/api/trading/*` not covered above (`reconnect`, `sync`, `simulate-price`, `test-connection`, `DELETE .../snapshots/:timestamp`) — the conservative default |
+| `operator` | Everything else under `/api/trading/*` not covered above (`reconnect`, `simulate-price`, `test-connection`, `DELETE .../snapshots/:timestamp`) — the conservative default |
 | `simulator` | Every route under `/api/simulator/*` |
+
+**Every write route that resolves to `read` — the complete list, with
+justification (correction 2026-09-27):** these seven, and only these
+seven, are `POST` routes gated by `read` instead of a write scope. Each
+one is a pure lookup that happens to carry a structured `Contract`/query
+payload in its body instead of query-string params — none of them
+creates, modifies, cancels, or reconnects anything:
+
+| Route | Why `read` is correct |
+|---|---|
+| `POST .../uta/:id/quote` | Looks up a live quote for a contract — the `POST` form exists only because the request body carries a full `Contract` object, not because it writes anything. Identical in effect to the `GET .../quote/:symbol` sibling route. |
+| `POST .../uta/:id/historical` | Fetches OHLCV bars from the broker — a pure read, and the route the Engine's `read`-scoped token calls (`services/engine/src/uta/uta-client.ts`). |
+| `POST .../uta/:id/contracts/details` | Contract-details lookup after a search hit — no broker state changes. |
+| `POST .../uta/:id/contract/option-contracts` / `option-chain` | Broker-side option-chain research reads. |
+| `POST .../uta/:id/contract/order-book` | Reads the live order book for a contract. |
+| `POST .../uta/:id/contract/expand` | Expands a hub contract (bond issuer, option chain, futures months) into its leaves — a catalog lookup, not a mutation. |
+
+**Corrected in this review — routes that must NOT be `read`:** the
+initial pass correctly kept these off `read`, but grouped `sync` with
+the pure administrative actions under `operator`, which is stricter
+than it needs to be. Corrected to `stage`, its true minimum:
+
+| Route | Scope | Why |
+|---|---|---|
+| `DELETE .../uta/:id/snapshots/:timestamp` | `operator` | Deletes a persisted snapshot — destructive, administrative. |
+| `POST .../uta/:id/reconnect` | `operator` | Tears down and recreates the broker connection — administrative, not a trading action. |
+| `POST /test-connection` | `operator` | Receives broker **credentials** in the request body to test them — the most sensitive route in the file, must never be reachable by anything less than `operator`. |
+| `POST .../uta/:id/sync` | `stage` (not `operator`) | Writes a real commit reflecting fill/cancel status changes (`UnifiedTradingAccount.sync()` → `this.git.sync(updates, state)`, [VERIFICADO EN REPOSITORIO]) — a genuine state write, not an admin action, so an Engine-scoped token (`read`+`stage` only, never `operator`) can legitimately call it without being handed broader privilege than it needs. |
 
 **Default-deny audit (correction A.2, 2026-09-27):**
 `services/uta/src/http/route-scope-audit.spec.ts` enumerates every route
