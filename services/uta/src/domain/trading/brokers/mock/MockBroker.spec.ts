@@ -729,6 +729,26 @@ describe('short positions — netLiquidation aggregation', () => {
   })
 })
 
+// ==================== AUDIT.md §20, item 6 — spreadBps/slippageBps/feeBps flow through fromConfig (preset config) ====================
+
+describe('MockBroker.fromConfig', () => {
+  it('wires spreadBps/slippageBps/feeBps from brokerConfig through to real fill behavior', async () => {
+    const b = MockBroker.fromConfig({ id: 'engine-paper', brokerConfig: { cash: 100_000, spreadBps: 100, slippageBps: 0, feeBps: 0 } })
+    b.setMarkPrice('BTC', '100')
+    const quote = await b.getQuote(makeContract({ aliceId: 'engine-paper|BTC', symbol: 'BTC' }))
+    expect(quote.bid).toBe('99')
+    expect(quote.ask).toBe('101')
+  })
+
+  it('defaults to zero spread/slippage/fee when brokerConfig omits them — unchanged from before this option existed', async () => {
+    const b = MockBroker.fromConfig({ id: 'engine-paper', brokerConfig: { cash: 100_000 } })
+    b.setMarkPrice('BTC', '100')
+    const quote = await b.getQuote(makeContract({ aliceId: 'engine-paper|BTC', symbol: 'BTC' }))
+    expect(quote.bid).toBe('100')
+    expect(quote.ask).toBe('100')
+  })
+})
+
 // ==================== M10 + A7b: real bid/ask/spread, slippage, fees — AUDIT.md §19, item 2 ====================
 
 describe('M10 + A7b: spread/slippage/fee fill pricing', () => {

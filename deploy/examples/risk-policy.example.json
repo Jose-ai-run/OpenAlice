@@ -45,8 +45,7 @@
       "priceBandPct": 5,
       "maxQuoteAgeSeconds": 30,
       "maxConsecutiveRejects": 5,
-      "maxSpreadBps": 50,
-      "allowSyntheticQuotes": true
+      "maxSpreadBps": 50
     }
   }
 }

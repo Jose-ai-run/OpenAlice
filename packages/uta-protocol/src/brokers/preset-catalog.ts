@@ -482,6 +482,13 @@ export const SIMULATOR_PRESET: BrokerPresetDef = {
   guardCategory: 'crypto',
   zodSchema: z.object({
     cash: z.coerce.number().default(100_000).describe('Starting cash (USD)'),
+    // AUDIT.md §20, item 6 — real, configurable spread/slippage/fee (M10/A7b)
+    // so R21 (max-spread) sees a genuine quote instead of needing
+    // policy.allowSyntheticQuotes. All optional; unset preserves the
+    // pre-existing zero-spread/zero-cost behavior exactly.
+    spreadBps: z.coerce.number().min(0).optional().describe('Half-spread in bps around markPrice (0 = no spread)'),
+    slippageBps: z.coerce.number().min(0).optional().describe('Extra unfavorable slippage in bps on top of the spread'),
+    feeBps: z.coerce.number().min(0).optional().describe('Trading fee in bps on notional, charged on every fill'),
   }),
   subtitleFields: [
     { field: 'cash', prefix: '$' },
@@ -490,7 +497,7 @@ export const SIMULATOR_PRESET: BrokerPresetDef = {
   // _instanceId into presetConfig on POST when it's missing; the
   // fingerprint then derives off that, giving each sim a unique id.
   fingerprintFields: ['_instanceId'],
-  toEngineConfig: (d) => ({ cash: d.cash }),
+  toEngineConfig: (d) => ({ cash: d.cash, spreadBps: d.spreadBps, slippageBps: d.slippageBps, feeBps: d.feeBps }),
   isPaper: () => true,
 }
 

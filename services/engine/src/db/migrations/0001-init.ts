@@ -7,6 +7,7 @@
  */
 import type { Migration } from '../migrate.js'
 import { migration0002CounterfactualTrades } from './0002-counterfactual-trades.js'
+import { migration0003MarketBars } from './0003-market-bars.js'
 
 export const migration0001Init: Migration = {
   id: 1,
@@ -65,4 +66,4 @@ export const migration0001Init: Migration = {
   },
 }
 
-export const migrations = [migration0001Init, migration0002CounterfactualTrades]
+export const migrations = [migration0001Init, migration0002CounterfactualTrades, migration0003MarketBars]

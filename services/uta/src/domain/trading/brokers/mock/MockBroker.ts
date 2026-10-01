@@ -189,14 +189,24 @@ export class MockBroker implements IBroker {
 
   static configSchema = z.object({
     cash: z.coerce.number().default(100_000),
+    // AUDIT.md §20, item 6 — real, configurable spread/slippage/fee (M10/A7b).
+    spreadBps: z.coerce.number().min(0).optional(),
+    slippageBps: z.coerce.number().min(0).optional(),
+    feeBps: z.coerce.number().min(0).optional(),
   })
   static configFields: import('../types.js').BrokerConfigField[] = [
     { name: 'cash', type: 'number', label: 'Starting cash (USD)', default: 100_000 },
+    { name: 'spreadBps', type: 'number', label: 'Spread (bps, half-spread around markPrice)', description: 'AUDIT.md §20 item 6 — 0/unset keeps R21 treating this account as synthetic unless policy.allowSyntheticQuotes is set.' },
+    { name: 'slippageBps', type: 'number', label: 'Slippage (bps, on top of the spread)' },
+    { name: 'feeBps', type: 'number', label: 'Trading fee (bps on notional)' },
   ]
 
   static fromConfig(config: { id: string; label?: string; brokerConfig: Record<string, unknown> }): MockBroker {
     const bc = MockBroker.configSchema.parse(config.brokerConfig)
-    return new MockBroker({ id: config.id, label: config.label, cash: bc.cash })
+    return new MockBroker({
+      id: config.id, label: config.label, cash: bc.cash,
+      spreadBps: bc.spreadBps, slippageBps: bc.slippageBps, feeBps: bc.feeBps,
+    })
   }
 
   // ---- Instance ----

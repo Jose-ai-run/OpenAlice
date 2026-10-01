@@ -2021,6 +2021,68 @@ npx tsc --noEmit (raíz), services/engine, services/uta  # limpios
   en `universe`, documentada aquí para que quede explícito y no se
   asuma cobertura que no existe.
 
+## 20. F6 — Backtesting con criterio de corte — 2026-10-01
+
+Bloque completo. Informe narrativo + tabla completa de las 92 variantes:
+[[docs/trading-engine/BACKTEST-REPORT.md]]. Pre-registro:
+[[docs/adr/0011-backtest-preregistration.md]] (commiteado `542c52cd`,
+ANTES de descargar un dato o correr un backtest).
+
+### 20.1 Lo construido
+
+- `services/engine/src/db/migrations/0003-market-bars.ts` (tablas
+  `market_bars` + `datasets`).
+- `services/engine/src/data/market-bars-store.ts` (upsert idempotente,
+  `deriveFourHourBars` — agrega 4 velas 1h alineadas a UTC, nunca
+  descarga 4h aparte).
+- `services/engine/src/cli/download-market-bars.ts` — paginación real
+  hacia atrás contra UTA (`CcxtBroker` limita cada llamada a 5000
+  velas), reusa `checkBarQuality`/`hashBars` (Fase 2).
+- `services/engine/src/backtest/{types,engine,metrics,bootstrap,
+  walk-forward,monotonicity,gates}.ts` — backtester event-driven real
+  (reutiliza `buildStrategyContext`/`strategy.evaluate()`/
+  `sizePosition` sin duplicar lógica), walk-forward 12m/3m, bootstrap
+  determinístico (PRNG sembrado, nunca `Math.random()` en los tests),
+  A3 (Spearman por quintil), los 8 gates de ADR-0011 §5.
+- `services/engine/src/cli/run-backtest-grid.ts` — orquesta las 92
+  variantes, detecta vecinos en la grilla para el gate de estabilidad,
+  corre holdout solo para lo que pasa WF (nada lo hizo).
+
+### 20.2 Dataset real descargado
+
+BTC: 57,148 velas 1h reales (2020-03-25 → 2026-10-01), 0
+huecos/duplicados/OHLC inválido. ETH: 48,638 velas 1h reales
+(2021-03-15 → 2026-10-01), mismos controles limpios. 14,286 / 12,159
+velas 4h derivadas. Hashes de dataset persistidos en `datasets`.
+
+### 20.3 Resultado — DECISIÓN
+
+**0 de 92 combinaciones pasaron todos los gates en walk-forward.**
+Ninguna llegó a holdout. G5 (Sharpe ajustado por Bonferroni, N=92)
+falló en el 100% de los casos — el gate más estricto, por diseño.
+**DECISIÓN mecánica (ADR-0011 §10): DETENER la inversión en el motor.**
+Detalle completo, tabla de 92 filas, candidato más cercano (que igual
+falla), comparación con buy-and-hold y limitaciones explícitas en
+[[docs/trading-engine/BACKTEST-REPORT.md]].
+
+### 20.4 Item 6 (menor) — spreadBps real en engine-paper
+
+Código: `MockBroker.configSchema`/`configFields`/`fromConfig` y el
+preset `mock-simulator` (`packages/uta-protocol/src/brokers/preset-catalog.ts`)
+ahora aceptan `spreadBps`/`slippageBps`/`feeBps` opcionales de punta a
+punta (2 tests nuevos). `allowSyntheticQuotes` retirado de la entrada
+`engine-paper` en `deploy/examples/risk-policy.example.json`.
+**Pendiente de aplicar localmente**: la cuenta real `engine-paper` vive
+en el `accounts.json` sellado del usuario (AES-256-GCM) — este
+documento no lo edita. Para activar un spread real: UI de Alice →
+Trading Config → cuenta `engine-paper` → campo nuevo "Spread (bps...)"
+(ya aparece en `configFields`), o editar `presetConfig` a mano
+agregando `"spreadBps": <valor>` (ningún valor es secreto). Sin ese
+paso, R21 seguirá tratando `engine-paper` como cotización sintética —
+y, sin `allowSyntheticQuotes`, la rechazará. El canary (Hito 1 Parte 2)
+no se volvió a correr en este bloque F6 porque el alcance pedido era
+backtesting, no PAPER en vivo.
+
 ## Resumen de la línea de tiempo de esta sesión
 
 - Herramientas verificadas: git 2.49.0, Node v24.12.0, pnpm 11.7.0 (vía `corepack pnpm`).
