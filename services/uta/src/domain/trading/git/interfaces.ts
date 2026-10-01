@@ -19,6 +19,7 @@ import type {
   CommitLogEntry,
   GitExportState,
   GitState,
+  PendingGitState,
   PriceChangeInput,
   SimulatePriceChangeResult,
   OrderStatusUpdate,
@@ -86,10 +87,26 @@ export interface ITradingGit {
 export interface OperationExecutionContext {
   commitHash: CommitHash
   operationIndex: number
+  /**
+   * [PROPUESTA] Hito 1 Parte 2 (AUDIT.md §19, item 1b) — every operation in
+   * THIS commit, in order, so a risk rule (R14) can recognize a sibling
+   * protective stop staged alongside its entry in the same commit. Always
+   * the full batch, including `operation` itself at `operationIndex`.
+   */
+  allOperations: readonly Operation[]
 }
 
 export interface TradingGitConfig {
   executeOperation: (operation: Operation, ctx?: OperationExecutionContext) => Promise<unknown>
   getGitState: () => Promise<GitState>
   onCommit?: (state: GitExportState) => void | Promise<void>
+  /**
+   * [PROPUESTA] Hito 1 Parte 2, F7 (M5) — fired whenever the staged/pending
+   * batch changes: after `add()` (staged, not yet committed), after
+   * `commit()` (pending, awaiting push), and with `null` once `push()` or
+   * `reject()` clears it. Independent of `onCommit` (which only fires on a
+   * completed commit) so a crash between `commit()` and `push()` can be
+   * recovered from `data/trading/<id>/pending.json` on restart.
+   */
+  onPendingChange?: (pending: PendingGitState | null) => void | Promise<void>
 }

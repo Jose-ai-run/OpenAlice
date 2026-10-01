@@ -12,7 +12,7 @@ import { createCcxtProviderTools } from './brokers/ccxt/ccxt-tools.js'
 import { createBroker } from './brokers/factory.js'
 import { getBrokerPreset } from '@traderalice/uta-protocol'
 import { UnifiedTradingAccount } from './UnifiedTradingAccount.js'
-import { loadGitState, createGitPersister } from './git-persistence.js'
+import { loadGitState, createGitPersister, loadPendingState, createPendingPersister } from './git-persistence.js'
 import { readUTAsConfig, type UTAConfig } from '@/core/config.js'
 import type { EventLog } from '@/core/event-log.js'
 import type { ToolCenter } from '@/core/tool-center.js'
@@ -62,13 +62,18 @@ export class UTAManager {
   async initUTA(cfg: UTAConfig): Promise<UnifiedTradingAccount> {
     const broker = await createBroker(cfg, { fxService: this.fxService })
     const savedState = await loadGitState(cfg.id)
+    // [PROPUESTA] Hito 1 Parte 2, F7 (M5) — restore a staged/pending batch
+    // that survived a crash between commit() and push().
+    const savedPending = await loadPendingState(cfg.id)
     const uta = new UnifiedTradingAccount(broker, {
       guards: cfg.guards,
       keyless: cfg.keyless,
       readOnly: cfg.readOnly,
       asVendor: cfg.asVendor,
       savedState,
+      savedPending,
       onCommit: createGitPersister(cfg.id),
+      onPendingChange: createPendingPersister(cfg.id),
       onHealthChange: (utaId, health) => {
         this.eventLog?.append('account.health', { accountId: utaId, ...health })
       },

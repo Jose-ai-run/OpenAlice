@@ -73,6 +73,12 @@ interface InternalOrder {
   filledQuantity?: Decimal
   /** Quantity-weighted average fill price (Decimal — no float noise). */
   avgFillPrice?: Decimal
+  /** Attached take-profit/stop-loss — acted on when THIS order fully fills (AUDIT.md §19, item 1d). */
+  tpsl?: TpSlParams
+  /** True for an order this broker created itself as a protective leg (AUDIT.md §19, item 1e) — the orphan-stop guard only ever cancels these, never a human/Engine-placed order. */
+  isProtectiveLeg?: boolean
+  /** [PROPUESTA] AUDIT.md §19 item 2, A7b — the bid/ask/spread this order actually filled against. Absent when never filled. */
+  filledBidAskSpread?: { bid: string; ask: string; spread: string }
 }
 
 // ==================== Options ====================
@@ -88,6 +94,20 @@ export interface MockBrokerOptions {
   label?: string
   cash?: number
   accountInfo?: Partial<AccountInfo>
+  /**
+   * [PROPUESTA] M10 (PROMPT_MASTER_CLAUDE_CODE.md §5) + AUDIT.md §19 item
+   * 2, A7b — half-spread in basis points around `markPrice` used to derive
+   * a genuine bid/ask (both for `getQuote` and for MKT fill pricing: buy
+   * at the ask, sell at the bid). Default 0 — existing callers that never
+   * set this keep the pre-existing fixed ±0.01 synthetic spread in
+   * `getQuote` and fill exactly at markPrice, byte-identical to before
+   * this option existed.
+   */
+  spreadBps?: number
+  /** M10 — extra unfavorable slippage in basis points applied on top of the spread at fill time. Default 0. */
+  slippageBps?: number
+  /** M10 — trading fee in basis points on notional, charged on every fill regardless of side. Default 0. */
+  feeBps?: number
 }
 
 // ==================== Defaults ====================
@@ -105,6 +125,9 @@ export const DEFAULT_CAPABILITIES: AccountCapabilities = {
   supportedSecTypes: ['STK', 'CRYPTO'],
   supportedOrderTypes: ['MKT', 'LMT', 'STP', 'STP LMT'],
   historicalBars: { supported: true, quality: 'realtime' },
+  // AUDIT.md §19, item 1d — placeOrder genuinely acts on `tpsl` (see
+  // `_attachProtectiveOrders`), not just records it for the call log.
+  supportsAttachedProtectiveStop: true,
 }
 
 // ==================== Factory helpers ====================
@@ -202,16 +225,57 @@ export class MockBroker implements IBroker {
   private _failRemaining = 0
   private _failMethods = new Set<string>()
 
+  private readonly _spreadBps: number
+  private readonly _slippageBps: number
+  private readonly _feeBps: number
+
   constructor(options: MockBrokerOptions = {}) {
     this.id = options.id ?? 'mock-paper'
     this.label = options.label ?? 'Mock Paper Account'
     this._cash = new Decimal(options.cash ?? 100_000)
+    this._spreadBps = options.spreadBps ?? 0
+    this._slippageBps = options.slippageBps ?? 0
+    this._feeBps = options.feeBps ?? 0
     if (options.accountInfo) {
       this._accountOverride = {
         baseCurrency: 'USD', netLiquidation: '0', totalCashValue: '0', unrealizedPnL: '0', realizedPnL: '0',
         ...options.accountInfo,
       }
     }
+  }
+
+  /**
+   * [PROPUESTA] AUDIT.md §19 item 2, A7b — real bid/ask around markPrice,
+   * `spreadBps` is the HALF-spread (bid = mid*(1-spreadBps/10000), ask =
+   * mid*(1+spreadBps/10000)). `spreadBps=0` (the default) collapses to
+   * bid=ask=mid, preserving every pre-existing call site exactly.
+   */
+  private _bidAsk(contract: Contract): { mid: Decimal; bid: Decimal; ask: Decimal; spread: Decimal } {
+    const mid = this._markPriceFor(contract) ?? new Decimal(100)
+    const half = mid.mul(this._spreadBps).div(10_000)
+    const bid = mid.minus(half)
+    const ask = mid.plus(half)
+    return { mid, bid, ask, spread: ask.minus(bid) }
+  }
+
+  /**
+   * [PROPUESTA] AUDIT.md §19 item 2, A7b — "en paper se compra al ask y se
+   * vende al bid más slippage": a BUY fills at the ask, pushed further
+   * unfavorably by `slippageBps`; a SELL fills at the bid, pushed further
+   * down by the same. With `spreadBps=0` and `slippageBps=0` (both
+   * default) this returns exactly `markPrice` — byte-identical fill price
+   * to every pre-existing test.
+   */
+  private _fillPrice(contract: Contract, side: string): { price: Decimal; bid: Decimal; ask: Decimal; spread: Decimal } {
+    const { bid, ask, spread } = this._bidAsk(contract)
+    const slip = (side === 'BUY' ? ask : bid).mul(this._slippageBps).div(10_000)
+    const price = side === 'BUY' ? ask.plus(slip) : bid.minus(slip)
+    return { price, bid, ask, spread }
+  }
+
+  /** M10 — fee in basis points on notional, charged on every fill regardless of side. Zero when `feeBps` is unset (default). */
+  private _fee(notional: Decimal): Decimal {
+    return notional.mul(this._feeBps).div(10_000)
   }
 
   // ==================== Call tracking ====================
@@ -283,7 +347,7 @@ export class MockBroker implements IBroker {
     const qty = !order.totalQuantity.equals(UNSET_DECIMAL) ? order.totalQuantity : new Decimal(0)
 
     if (isMarket) {
-      const price = this._markPriceFor(contract) ?? new Decimal(100)
+      const { price, bid, ask, spread } = this._fillPrice(contract, side)
       const mult = multiplierOf(contract)
 
       // Update position; on oversell `_applyFill` throws — match real broker
@@ -297,16 +361,20 @@ export class MockBroker implements IBroker {
 
       // Cash flow honours multiplier: 1 OPT contract @ $58 with multiplier=100
       // costs $5,800, not $58. IBroker contract requires this even though
-      // position.avgCost is per-unit.
-      const cost = qty.mul(price).mul(mult)
-      this._cash = side === 'BUY' ? this._cash.minus(cost) : this._cash.plus(cost)
+      // position.avgCost is per-unit. M10 fee (feeBps, default 0) is always
+      // a cash outflow, independent of side.
+      const notional = qty.mul(price).mul(mult)
+      const fee = this._fee(notional)
+      this._cash = (side === 'BUY' ? this._cash.minus(notional) : this._cash.plus(notional)).minus(fee)
 
       const filledOrder = this._cloneOrder(order, orderId)
       this._orders.set(orderId, {
         id: orderId, contract, order: filledOrder,
         status: 'Filled', fillPrice: price.toNumber(),
-        filledQuantity: qty, avgFillPrice: price,
+        filledQuantity: qty, avgFillPrice: price, tpsl,
+        filledBidAskSpread: { bid: bid.toString(), ask: ask.toString(), spread: spread.toString() },
       })
+      this._attachProtectiveOrders(contract, side, qty, tpsl)
 
       const orderState = new OrderState()
       orderState.status = 'Filled'
@@ -316,7 +384,7 @@ export class MockBroker implements IBroker {
     // Limit/stop order → pending
     const pendingOrder = this._cloneOrder(order, orderId)
     this._orders.set(orderId, {
-      id: orderId, contract, order: pendingOrder, status: 'Submitted',
+      id: orderId, contract, order: pendingOrder, status: 'Submitted', tpsl,
     })
 
     const orderState = new OrderState()
@@ -478,12 +546,12 @@ export class MockBroker implements IBroker {
 
   async getQuote(contract: Contract): Promise<Quote> {
     this._record('getQuote', [contract])
-    const price = this._markPriceFor(contract) ?? new Decimal(100)
+    const { mid, bid, ask } = this._bidAsk(contract)
     return {
       contract,
-      last: price.toString(),
-      bid: price.minus('0.01').toString(),
-      ask: price.plus('0.01').toString(),
+      last: mid.toString(),
+      bid: bid.toString(),
+      ask: ask.toString(),
       volume: '1000000',
       timestamp: new Date(),
     }
@@ -592,15 +660,32 @@ export class MockBroker implements IBroker {
       throw new Error('fillOrder: qty exceeds order totalQuantity')
     }
 
-    const price = opts.price != null
-      ? (opts.price instanceof Decimal ? opts.price : new Decimal(opts.price))
-      : (this._markPriceFor(internal.contract)
-        ?? (!internal.order.lmtPrice.equals(UNSET_DECIMAL) ? internal.order.lmtPrice : new Decimal(100)))
-
     const side = internal.order.action.toUpperCase()
+    // Explicit caller-supplied price (tests, simulator god-view calls) is
+    // used exactly as given — spread/slippage only apply on the default
+    // path (a real trigger via markPrice), never overriding a caller's
+    // explicit intent. Bid/ask/spread are still recorded either way — see
+    // AUDIT.md §19 item 2.
+    let price: Decimal
+    let filledBidAskSpread: { bid: string; ask: string; spread: string }
+    if (opts.price != null) {
+      price = opts.price instanceof Decimal ? opts.price : new Decimal(opts.price)
+      const { bid, ask, spread } = this._bidAsk(internal.contract)
+      filledBidAskSpread = { bid: bid.toString(), ask: ask.toString(), spread: spread.toString() }
+    } else if (this._markPriceFor(internal.contract)) {
+      const filled = this._fillPrice(internal.contract, side)
+      price = filled.price
+      filledBidAskSpread = { bid: filled.bid.toString(), ask: filled.ask.toString(), spread: filled.spread.toString() }
+    } else {
+      price = !internal.order.lmtPrice.equals(UNSET_DECIMAL) ? internal.order.lmtPrice : new Decimal(100)
+      filledBidAskSpread = { bid: price.toString(), ask: price.toString(), spread: '0' }
+    }
+    internal.filledBidAskSpread = filledBidAskSpread
+
     this._applyFill(internal.contract, side, fillQty, price)
-    const cost = fillQty.mul(price).mul(multiplierOf(internal.contract))
-    this._cash = side === 'BUY' ? this._cash.minus(cost) : this._cash.plus(cost)
+    const notional = fillQty.mul(price).mul(multiplierOf(internal.contract))
+    const fee = this._fee(notional)
+    this._cash = (side === 'BUY' ? this._cash.minus(notional) : this._cash.plus(notional)).minus(fee)
 
     // Track cumulative execution like a real broker: filledQuantity adds up
     // across partial fills, avgFillPrice is the quantity-weighted average.
@@ -617,6 +702,39 @@ export class MockBroker implements IBroker {
     } else {
       internal.status = 'Filled'
       internal.fillPrice = price.toNumber()
+      this._attachProtectiveOrders(internal.contract, side, newQty, internal.tpsl)
+    }
+  }
+
+  /**
+   * [PROPUESTA] Hito 1 Parte 2 (AUDIT.md §19, item 1d) — the real action on
+   * `tpsl` that was missing: a genuine resting protective order, not just a
+   * recorded-and-ignored parameter (confirmed gap from the first canary
+   * run). Creates a reduce-only-by-convention closing-side order per leg;
+   * marked `isProtectiveLeg` so the orphan-stop guard (item 1e,
+   * `_matchPendingOrders`) only ever cancels orders this broker itself
+   * created for this purpose.
+   */
+  private _attachProtectiveOrders(contract: Contract, filledSide: string, filledQty: Decimal, tpsl?: TpSlParams): void {
+    if (!tpsl) return
+    const closingSide = filledSide === 'BUY' ? 'SELL' : 'BUY'
+    if (tpsl.stopLoss) {
+      const stopId = `mock-ord-${this._nextOrderId++}`
+      const stopOrder = new Order()
+      stopOrder.action = closingSide
+      stopOrder.orderType = 'STP'
+      stopOrder.totalQuantity = filledQty
+      stopOrder.auxPrice = new Decimal(tpsl.stopLoss.price)
+      this._orders.set(stopId, { id: stopId, contract, order: stopOrder, status: 'Submitted', isProtectiveLeg: true })
+    }
+    if (tpsl.takeProfit) {
+      const tpId = `mock-ord-${this._nextOrderId++}`
+      const tpOrder = new Order()
+      tpOrder.action = closingSide
+      tpOrder.orderType = 'LMT'
+      tpOrder.totalQuantity = filledQty
+      tpOrder.lmtPrice = new Decimal(tpsl.takeProfit.price)
+      this._orders.set(tpId, { id: tpId, contract, order: tpOrder, status: 'Submitted', isProtectiveLeg: true })
     }
   }
 
@@ -625,6 +743,32 @@ export class MockBroker implements IBroker {
     const internal = this._orders.get(orderId)
     if (!internal) throw new Error(`MockBroker[${this.id}]: order ${orderId} not found`)
     internal.status = 'Cancelled'
+  }
+
+  /**
+   * [PROPUESTA] Hito 1 Parte 2 (AUDIT.md §19, item 1e) — "the monitor" that
+   * proactively cancels any protective leg whose covering position no
+   * longer exists, independent of a price trigger (the `_matchPendingOrders`
+   * guard above only catches it reactively, on the next markPrice tick).
+   * There is no live PositionMonitor process yet (Fase 7's
+   * `services/engine/src/execution/` is still a placeholder) — a caller
+   * (a test, a demo driver, a future monitor loop) invokes this directly.
+   * Returns the cancelled orderIds.
+   */
+  cancelOrphanProtectiveLegs(): string[] {
+    const cancelled: string[] = []
+    for (const internal of this._orders.values()) {
+      if (internal.status !== 'Submitted' || !internal.isProtectiveLeg) continue
+      const nativeKey = this.getNativeKey(internal.contract)
+      const side = internal.order.action.toUpperCase()
+      const coveringSide = side === 'SELL' ? 'long' : 'short'
+      const position = this._positions.get(nativeKey)
+      if (!position || position.side !== coveringSide || position.quantity.lt(internal.order.totalQuantity)) {
+        internal.status = 'Cancelled'
+        cancelled.push(internal.id)
+      }
+    }
+    return cancelled
   }
 
   /**
@@ -832,8 +976,33 @@ export class MockBroker implements IBroker {
       }
       if (!triggered) continue
 
-      this.fillOrder(internal.id, { price })
-      filled.push(internal.id)
+      // [PROPUESTA] Hito 1 Parte 2 (AUDIT.md §19, item 1e) — a protective
+      // leg (this broker's own stop/take-profit, `isProtectiveLeg`) whose
+      // position no longer exists (already closed by its sibling leg, or
+      // externally) must NEVER fill: for a SELL leg that would throw inside
+      // `_applyFill` (oversell guard) and abort this whole loop before later
+      // orders in iteration order get a chance to run; for a BUY leg
+      // `_applyFill` has NO guard at all and would silently OPEN A NEW,
+      // UNINTENDED REVERSE LONG POSITION — the exact bug this item exists
+      // to close. Cancel it instead of either outcome.
+      if (internal.isProtectiveLeg) {
+        const coveringSide = side === 'SELL' ? 'long' : 'short'
+        const position = this._positions.get(nativeKey)
+        if (!position || position.side !== coveringSide || position.quantity.lt(order.totalQuantity)) {
+          internal.status = 'Cancelled'
+          continue
+        }
+      }
+
+      try {
+        this.fillOrder(internal.id, { price })
+        filled.push(internal.id)
+      } catch {
+        // A non-protective order (no isProtectiveLeg guard above applies)
+        // can still legitimately fail the oversell guard in `_applyFill` —
+        // don't let it abort evaluation of the remaining pending orders for
+        // this nativeKey.
+      }
     }
     return filled
   }

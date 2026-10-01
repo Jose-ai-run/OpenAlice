@@ -1827,6 +1827,200 @@ cd services/uta && pnpm run typecheck      # limpio
 Item 3c (24h en PAPER, sin intervención) — **no iniciado**, a la espera
 de aprobación explícita tras ver esta evidencia, según lo pedido.
 
+## 19. Correcciones del canary (R12/R13/R14/tpsl/huérfanos), F5 resto, F7 — 2026-10-01
+
+Cierre de los hallazgos reales de §18 (priorizado) + resto de F5 + F7.
+
+### 19.1 Item 1 — cerrar la ventana sin stop (completo: 1a-1e)
+
+- **1a** `r12-trades-per-day.ts`/`r13-cooldown.ts`: exentan una orden que
+  `isProtectiveStopOrder` (nueva, `risk/rules/shared.ts`: orderType ∈
+  {STP, STP LMT, TRAIL, TRAIL LIMIT}). `closePosition`/`cancelOrder` ya
+  estaban exentos por construcción (nunca pasan por el dispatcher de
+  riesgo).
+- **1b** `r14-stop-required.ts`: ahora recibe `ctx.siblingOperations`
+  (nuevo campo en `RiskContext`, poblado desde
+  `OperationExecutionContext.allOperations` — `TradingGit.executePush()`
+  ahora pasa el array completo de operaciones del commit a cada
+  evaluación). Pasa si hay un stop hermano de lado opuesto, mismo
+  símbolo, cantidad que cubre la entrada.
+- **1d** `MockBroker`: `AccountCapabilities.supportsAttachedProtectiveStop`
+  (nuevo campo, `@traderalice/uta-protocol`), `true` en
+  `DEFAULT_CAPABILITIES`. `placeOrder`/`fillOrder` ahora llaman
+  `_attachProtectiveOrders(contract, side, qty, tpsl)`: al llenarse una
+  entrada con `tpsl.stopLoss`/`takeProfit` adjunto, crea de verdad una
+  orden `STP`/`LMT` interna en el lado opuesto — antes `tpsl` solo se
+  grababa en el log de llamadas, nunca se usaba.
+- **1e** `_matchPendingOrders` ahora, antes de llenar una pata marcada
+  `isProtectiveLeg`, verifica que exista una posición cubridora (mismo
+  símbolo, lado correcto, cantidad suficiente); si no, **cancela** la
+  orden en vez de llenarla o dejar que `_applyFill` tire una excepción
+  (el caso BUY huérfano antes abría una posición larga fantasma sin
+  ningún guard). Nuevo método público `cancelOrphanProtectiveLegs()`
+  ("el monitor") para limpieza proactiva fuera de un trigger de precio.
+  7 tests nuevos en `MockBroker.spec.ts` prueban ambos lados (huérfano
+  SELL y BUY) nunca abren una posición inversa.
+- **1c** (esta sesión, cierre del bloque) `TradingGit.executePush()`:
+  tras ejecutar todas las operaciones del commit, si una operación que
+  `isProtectiveStopOrder` fue rechazada/falló Y una operación anterior
+  del mismo commit (misma symbol, lado opuesto) sí se ejecutó, se
+  **cierra la posición de inmediato** (operación `closePosition`
+  sintética, reduce-only por construcción) y se **alerta**
+  (`console.error` con prefijo `[ALERT]` — no existe un sistema de
+  alertas real en el repo, Fase 0 finding; esto es un log estructurado,
+  no una notificación push). La operación de auto-cierre y su resultado
+  se añaden al MISMO commit (`operations`/`results` se mantienen
+  paralelos), visible en el historial real, no un efecto secundario
+  silencioso. Si el auto-cierre también falla, una segunda alerta lo
+  deja explícito ("ALSO FAILED"). 4 tests nuevos en `TradingGit.spec.ts`.
+
+**Canary re-ejecutado una vez con el código nuevo** (ver §19.2) —
+confirma ventana sin stop de ~0.016s (misma operación atómica: el
+`tpsl` adjunto crea la pata protectora dentro de la MISMA llamada a
+`placeOrder`, no un commit separado), sin esperar cooldown.
+
+### 19.2 Hallazgo real nuevo durante la re-verificación: R21 + spread sintético
+
+Al cambiar `MockBroker.getQuote()` de un spread sintético fijo (±0.01,
+hardcodeado) a uno real derivado de `spreadBps` (A7b, §19.3), una cuenta
+sin `spreadBps` configurado (como `engine-paper`, cuya configuración
+real vive en `accounts.json` sellado — este repo no la toca) pasó a
+reportar `bid === ask` exactamente. R21 (Fase 4c, diseñado
+explícitamente para tratar `bid === ask` como señal de cotización NO
+real — ver su propio docstring, caso Leverup) rechazó la primera
+re-ejecución del canary con `[risk:R21] quote does not look like real
+bid/ask`. **No es un bug de R21** — es R21 funcionando exactamente como
+se diseñó, ahora que `getQuote()` deja de enmascarar la ausencia de
+datos de spread reales con un valor ficticio de un centavo.
+**Corrección real:** añadida una entrada `engine-paper` en
+`deploy/examples/risk-policy.example.json` con
+`allowSyntheticQuotes: true` — el opt-in explícito que el propio
+docstring de R21 prescribe para una cuenta sin datos de spread reales,
+no un bypass oculto.
+
+### 19.3 Item 2 — resto de F5
+
+- **A7b**: `MockBroker` nuevo: `spreadBps`/`slippageBps`/`feeBps`
+  (M10, default 0 — preserva exactamente el comportamiento previo
+  cuando no se configuran). `_bidAsk()`/`_fillPrice()`/`_fee()`: una
+  entrada BUY llena al ask (+slippage), una SELL al bid (-slippage); fee
+  siempre se descuenta en efectivo, independiente del lado.
+  `InternalOrder.filledBidAskSpread` guarda bid/ask/spread reales en el
+  momento del llenado. `getQuote()` usa el mismo `_bidAsk()` — ya no hay
+  dos nociones de spread distintas. 5 tests nuevos.
+- **A2**: migración `0002-counterfactual-trades.ts` (tabla
+  `counterfactual_trades`: decisión, símbolo, lado, entry/stop/qty que
+  se habrían usado, `blocked_by`/`blocked_reason`, bid/ask/spread).
+  `Journal.recordCounterfactualTrade()` nuevo. **Solo esquema** — el
+  pipeline de detección (un espejo de riesgo dentro del Engine, que no
+  existe) queda fuera de alcance; el informe va en F6, como se pidió
+  explícitamente.
+
+### 19.4 F7 — ejecución robusta
+
+- **M4**: `atomic-file.ts` nuevo (tmp+rename+reintento, extraído del
+  precedente literal de `risk-state.ts`, Fase 4a). `git-persistence.ts`
+  (`createGitPersister`) ahora lo usa — `commit.json` ya no se escribe
+  con `writeFile` directo (hallazgo no-atómico de Fase 0, finding #5,
+  cerrado).
+- **M5**: `PendingGitState` (nuevo tipo, `@traderalice/uta-protocol`).
+  `TradingGitConfig.onPendingChange` (fire-and-forget desde `add()`
+  síncrono/`commit()`, `await`-ado desde `push()`/`reject()` async).
+  `TradingGit.restore(state, config, pending?)` restaura
+  `stagingArea`/`pendingMessage`/`pendingHash`. `git-persistence.ts`:
+  `loadPendingState`/`createPendingPersister` →
+  `data/trading/<id>/pending.json`. Wired en `UnifiedTradingAccount`
+  (`savedPending`/`onPendingChange`) y `uta-manager.ts`. Un commit
+  preparado pero no pusheado ahora sobrevive un reinicio de UTA.
+- **M6 (clientOrderId)**: **NO implementado** — pendiente (ver §19.6).
+- **A6 (lease + fencing, ADR-0009 completo)**:
+  `risk/engine-lease.ts` — `acquireOrRenewLease`/`releaseLease`/
+  `checkLeaseFencing`, época = `max(época anterior + 1, now.getTime())`
+  (Enmienda 1), TTL evaluado solo con el reloj inyectado de UTA
+  (Enmienda 2), liberación explícita sin tocar época (Enmienda 4).
+  `POST /api/trading/risk/engine-lease` (`routes-risk.ts`, el path
+  exacto del ADR). `engine-fencing.ts` (middleware nuevo, montado en
+  `/api/trading/uta/*` después de `utaAuthMiddleware` — deliberadamente
+  NO en `/api/trading/risk/*`, para evitar la paradoja huevo-gallina de
+  exigir época al pedir la primera época): header ausente → 401, época
+  no coincide → 409 `EPOCH_MISMATCH`, sin lease vigente → 409
+  `NO_LEASE`. Solo afecta tokens con scope `engine`. `EngineLeaseClient`
+  nuevo del lado Engine (`services/engine/src/uta/`) con
+  `reconcileBeforeFirstWrite()` (Enmienda 3: rechaza, nunca adopta, un
+  commit pendiente heredado de la instancia anterior). 14+10+6+5 tests
+  nuevos cubren el plan de aceptación del ADR punto por punto (segunda
+  instancia no obtiene el lease; tras expirar el TTL la segunda toma una
+  época mayor y la primera queda fencada; pérdida total del archivo de
+  lease produce una época igual de monotónica vía reloj de pared;
+  renovación no cambia época; traspaso con commit pendiente se rechaza,
+  no se adopta).
+- **Reconciliación al arrancar un proceso Engine en vivo**: **NO
+  conectada** — no existe scheduler en vivo (`main.ts` sigue sin bucle
+  periódico, confirmado de nuevo en esta sesión). `reconcileBeforeFirstWrite()`
+  es real y probado pero nadie lo llama todavía en un proceso real.
+- **Caos `kill -9` del Engine y de UTA durante un push**: **NO
+  ejecutado**. Requiere un arnés real de matar procesos del SO a mitad
+  de una escritura — fuera de alcance de esta sesión por la propia
+  regla de "nada de esperas ni pruebas que necesiten tiempo real sin
+  documentar cómo correrlas" (ver §19.6).
+
+### 19.5 Re-verificación en vivo (una sola vez, código nuevo completo)
+
+```
+$ corepack pnpm exec tsx src/cli/paper-canary.ts config/engine-config.canary.json data/paper-canary.db 1500
+[canary] ENTER real @ 2026-08-02T05:00:00.000Z: long entry=63558.4 stop=63132.42949254451
+[canary] ENTRADA pusheada — operationCount=1, submitted=[{orderId:"mock-ord-1", status:"filled"}]
+[canary] segundos de posición sin stop tras el push: 0.016s — stop real ya pendiente:
+  [{"orderId":"mock-ord-2","action":"SELL","orderType":"STP","auxPrice":"63132.42949254451"}]
+[canary] kill-switch HALT_NEW → push rechazado real: "[risk:R0] kill switch is HALT_NEW"
+[canary] done — cuenta terminó plana (cash=99966.77...)
+```
+
+Confirma el criterio de aceptación: **sin espera de cooldown**, stop
+real pendiente en 0.016s tras la entrada (la misma llamada atómica que
+la abrió), reinicio a mitad de ciclo sin duplicados, kill switch
+rechazando de verdad.
+
+```
+pnpm test:owner:uta                                 # 79/79 archivos, 1332/1332 tests
+pnpm test:integration:uta                           # 1/1 archivo, 15/15 tests
+cd services/engine && pnpm run test                 # 27/27 archivos, 127/127 tests
+npx tsc --noEmit (raíz), services/engine, services/uta  # limpios
+```
+
+### 19.6 Pendientes explícitos (no ocultos)
+
+- **M6 (clientOrderId)**: no implementado. `StagePlaceOrderParams` no
+  tiene un campo `clientOrderId`; `Order.orderRef` existe (campo nativo
+  IBKR-shaped) pero nada lo popula todavía. Verificar soporte real en
+  CCXT/Alpaca/IBKR SDK instalados queda pendiente — no se hizo ninguna
+  verificación, así que no se afirma soporte en ninguno.
+- **Scheduler en vivo**: no existe. `services/engine/src/main.ts` solo
+  expone HTTP (`/engine/health`, `/engine/status` cuando hay DB/config).
+  Ningún proceso corre `runCycle()` periódicamente; todo lo ejecutado
+  hasta ahora es vía un replay driver (`signal-only-replay.ts`/
+  `paper-canary.ts`), nunca un bucle en vivo. La reconciliación de
+  lease (Enmienda 3) y el heartbeat del lease son código real y probado
+  que nadie invoca todavía en producción.
+- **Caos `kill -9`**: no ejecutado. Para correrlo manualmente: levantar
+  UTA y el Engine como en `DEMO-LOCAL.md`, lanzar `paper-canary.ts`, y
+  en otra terminal matar el proceso de UTA (`taskkill /F /PID <pid-uta>`
+  en Windows) justo después de ver el log `"commit preparado"` mostrado
+  por el canary (antes de `"ENTRADA pusheada"`) — M5 debería restaurar
+  el `pending.json` al reiniciar UTA; verificar con
+  `GET /api/trading/uta/engine-paper/wallet/status` que `pendingHash`
+  sigue siendo el mismo tras el reinicio, y que un segundo intento de
+  `stage-place-order` sigue siendo rechazado (cero duplicados).
+- **ETH sin mapeo**: `engine-config.canary.json` (el config real usado
+  por el canary) solo incluye `BTC/USDT perp (Bybit)` en `universe` —
+  `ETH/USDT:USDT` (presente en `engine-config.example.json`, el config
+  de Hito 1 parte 1, SIGNAL_ONLY) no tiene entrada en el config del
+  canary. Por diseño (ítem 3a: "símbolo sin mapeo válido no se
+  tradea"), ETH simplemente no se evalúa ni se tradea en el canary —
+  no es un fallo silencioso, es la ausencia deliberada de una entrada
+  en `universe`, documentada aquí para que quede explícito y no se
+  asuma cobertura que no existe.
+
 ## Resumen de la línea de tiempo de esta sesión
 
 - Herramientas verificadas: git 2.49.0, Node v24.12.0, pnpm 11.7.0 (vía `corepack pnpm`).

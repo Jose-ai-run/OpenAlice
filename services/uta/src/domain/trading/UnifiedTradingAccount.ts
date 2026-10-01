@@ -27,6 +27,7 @@ import type {
   GitCommit,
   GitState,
   GitExportState,
+  PendingGitState,
   CommitLogEntry,
   PriceChangeInput,
   SimulatePriceChangeResult,
@@ -42,7 +43,11 @@ import './contract-ext.js'
 export interface UnifiedTradingAccountOptions {
   guards?: Array<{ type: string; options?: Record<string, unknown> }>
   savedState?: GitExportState
+  /** [PROPUESTA] Hito 1 Parte 2, F7 (M5) — a staged/pending batch persisted before a crash. */
+  savedPending?: PendingGitState
   onCommit?: (state: GitExportState) => void | Promise<void>
+  /** [PROPUESTA] Hito 1 Parte 2, F7 (M5) — see `TradingGitConfig.onPendingChange`. */
+  onPendingChange?: (pending: PendingGitState | null) => void | Promise<void>
   onHealthChange?: (accountId: string, health: BrokerHealthInfo) => void
   onPostPush?: (accountId: string) => void | Promise<void>
   onPostReject?: (accountId: string) => void | Promise<void>
@@ -208,10 +213,11 @@ export class UnifiedTradingAccount {
       executeOperation: riskCheckedDispatcher,
       getGitState: this._getState,
       onCommit: options.onCommit,
+      onPendingChange: options.onPendingChange,
     }
 
-    this.git = options.savedState
-      ? TradingGit.restore(options.savedState, gitConfig)
+    this.git = (options.savedState || options.savedPending)
+      ? TradingGit.restore(options.savedState ?? { commits: [], head: null }, gitConfig, options.savedPending)
       : new TradingGit(gitConfig)
 
     // Kick off broker connection asynchronously — UTA is usable immediately;

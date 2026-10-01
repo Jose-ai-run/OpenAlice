@@ -173,6 +173,19 @@ export interface GitExportState {
   head: CommitHash | null
 }
 
+/**
+ * [PROPUESTA] Hito 1 Parte 2, F7 (M5) — staged-but-not-yet-pushed state,
+ * persisted separately from `GitExportState` (`data/trading/<id>/pending.json`,
+ * per PROMPT_MASTER_CLAUDE_CODE.md §5 M5) so a crash between `commit()` and
+ * `push()` doesn't lose the pending commit on restart.
+ */
+export interface PendingGitState {
+  stagingArea: Operation[]
+  /** Null while staged but not yet committed (`add()` called, `commit()` not yet). */
+  pendingMessage: string | null
+  pendingHash: CommitHash | null
+}
+
 // ==================== Sync ====================
 
 export interface OrderStatusUpdate {

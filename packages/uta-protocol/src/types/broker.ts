@@ -449,6 +449,15 @@ export interface AccountCapabilities {
   supportedOrderTypes: string[]
   /** Absent ⇒ no historical-bar support (loud-refuse on getHistorical). */
   historicalBars?: HistoricalBarsCapability
+  /**
+   * [PROPUESTA] Hito 1 Parte 2 (AUDIT.md §19, item 1d) — true when
+   * `placeOrder`'s `tpsl` parameter actually creates a real resting
+   * protective order broker-side (not just accepted and ignored). Absent or
+   * false ⇒ the caller must stage its own separate stop order in the same
+   * commit (R14 recognizes that sibling — AUDIT.md §19 item 1b) instead of
+   * relying on `tpsl`.
+   */
+  supportsAttachedProtectiveStop?: boolean
 }
 
 // ==================== Broker config field descriptor ====================

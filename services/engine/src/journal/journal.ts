@@ -46,6 +46,23 @@ export interface RecordOrderEventInput {
   now: Date
 }
 
+/** [PROPUESTA] AUDIT.md §19, item 2 (A2) — a signal that would have traded but was blocked. */
+export interface RecordCounterfactualTradeInput {
+  decisionId: number
+  symbol: string
+  aliceId: string
+  side: 'BUY' | 'SELL'
+  wouldBeEntry: string
+  wouldBeStop: string
+  wouldBeQty?: string
+  blockedBy: string
+  blockedReason: string
+  bid?: string
+  ask?: string
+  spread?: string
+  now: Date
+}
+
 function reasonCodesOf(decision: StrategyDecision): string[] | undefined {
   return decision.kind === 'NONE' || decision.kind === 'EXIT' ? decision.reasonCodes : undefined
 }
@@ -96,6 +113,21 @@ export class Journal {
       INSERT INTO order_events (intent_id, event_type, detail_json, created_at)
       VALUES (?, ?, ?, ?)
     `).run(input.intentId, input.eventType, input.detail !== undefined ? JSON.stringify(input.detail) : null, input.now.toISOString())
+    return this.lastInsertId()
+  }
+
+  /** [PROPUESTA] AUDIT.md §19, item 2 (A2) — records a blocked signal for the F6 report. */
+  recordCounterfactualTrade(input: RecordCounterfactualTradeInput): number {
+    this.db.prepare(`
+      INSERT INTO counterfactual_trades (decision_id, symbol, alice_id, side, would_be_entry, would_be_stop, would_be_qty, blocked_by, blocked_reason, bid, ask, spread, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      input.decisionId, input.symbol, input.aliceId, input.side,
+      input.wouldBeEntry, input.wouldBeStop, input.wouldBeQty ?? null,
+      input.blockedBy, input.blockedReason,
+      input.bid ?? null, input.ask ?? null, input.spread ?? null,
+      input.now.toISOString(),
+    )
     return this.lastInsertId()
   }
 

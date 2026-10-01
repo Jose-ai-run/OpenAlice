@@ -7,7 +7,7 @@
  */
 import { describe, it, expect } from 'vitest'
 import { randomUUID } from 'node:crypto'
-import { createRiskRoutes } from './routes-risk.js'
+import { createRiskRoutes, createEngineLeaseRoutes } from './routes-risk.js'
 import type { UTAEngineContext } from '../types.js'
 
 function uniqueAccountId(): string {
@@ -85,5 +85,41 @@ describe('POST /uta/:id/kill-switch/reset', () => {
     const { status, body } = await req(routes, 'POST', `/uta/${id}/kill-switch/reset`, { reason: 'operator confirmed', force: true })
     expect(status).toBe(200)
     expect(body).toEqual({ accountId: id, status: 'NORMAL', reason: 'operator confirmed' })
+  })
+})
+
+describe('POST /engine-lease (ADR-0009, A6)', () => {
+  async function leaseReq(body: unknown) {
+    const routes = createEngineLeaseRoutes()
+    const init: RequestInit = { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }
+    const res = await routes.request('/engine-lease', init)
+    return { status: res.status, body: await res.json().catch(() => null) }
+  }
+
+  it('validates the body', async () => {
+    const { status } = await leaseReq({ accountId: '' })
+    expect(status).toBe(400)
+  })
+
+  it('grants a fresh lease', async () => {
+    const { status, body } = await leaseReq({ accountId: uniqueAccountId(), instanceId: 'engine-1', ttlSec: 30 })
+    expect(status).toBe(200)
+    expect(body).toMatchObject({ epoch: expect.any(Number), expiresAt: expect.any(String) })
+  })
+
+  it('409s with the holder identity when a different instance tries to acquire', async () => {
+    const accountId = uniqueAccountId()
+    await leaseReq({ accountId, instanceId: 'engine-1', ttlSec: 30 })
+    const { status, body } = await leaseReq({ accountId, instanceId: 'engine-2', ttlSec: 30 })
+    expect(status).toBe(409)
+    expect(body).toMatchObject({ error: 'LEASE_HELD', holder: { instanceId: 'engine-1' } })
+  })
+
+  it('releases the lease for the current holder', async () => {
+    const accountId = uniqueAccountId()
+    await leaseReq({ accountId, instanceId: 'engine-1', ttlSec: 3600 })
+    const { status, body } = await leaseReq({ accountId, instanceId: 'engine-1', ttlSec: 3600, release: true })
+    expect(status).toBe(200)
+    expect(body).toEqual({ released: true })
   })
 })

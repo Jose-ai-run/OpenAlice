@@ -193,6 +193,14 @@ describe('R12 trades per day', () => {
     })
     expect(r12TradesPerDay.check(ctx)?.code).toBe('R12')
   })
+  it('exempts a protective-stop order even at the daily cap (AUDIT.md §19, item 1a)', () => {
+    const ctx = makeRiskContext({
+      policy: makeAccountPolicy({ maxTradesPerDay: 2 }),
+      state: { ...initialRiskState('d'), tradesToday: 2 },
+      operation: makePlaceOrder({ orderType: 'STP', action: 'SELL', auxPrice: 90 }),
+    })
+    expect(r12TradesPerDay.check(ctx)).toBeNull()
+  })
 })
 
 describe('R13 cooldown', () => {
@@ -212,6 +220,14 @@ describe('R13 cooldown', () => {
     })
     expect(r13Cooldown.check(ctx)).toBeNull()
   })
+  it('exempts a protective-stop order even while its own symbol is on cooldown — the real canary finding (AUDIT.md §19, item 1a)', () => {
+    const ctx = makeRiskContext({
+      now: new Date('2026-09-25T12:00:00.000Z'),
+      state: { ...initialRiskState('d'), cooldownUntil: { AAPL: '2026-09-25T12:05:00.000Z' } },
+      operation: makePlaceOrder({ symbol: 'AAPL', orderType: 'STP', action: 'SELL', auxPrice: 90 }),
+    })
+    expect(r13Cooldown.check(ctx)).toBeNull()
+  })
 })
 
 describe('R14 stop required', () => {
@@ -227,6 +243,37 @@ describe('R14 stop required', () => {
   it('is skipped when the policy does not require a stop', () => {
     const ctx = makeRiskContext({ policy: makeAccountPolicy({ requireStopLoss: false }), operation: makePlaceOrder({ orderType: 'MKT' }) })
     expect(r14StopRequired.check(ctx)).toBeNull()
+  })
+
+  describe('covering sibling stop in the same commit (AUDIT.md §19, item 1b)', () => {
+    it('allows a bare entry when a covering opposite-side STP sibling is in the same commit', () => {
+      const entry = makePlaceOrder({ symbol: 'AAPL', action: 'BUY', orderType: 'MKT', totalQuantity: 10 })
+      const stop = makePlaceOrder({ symbol: 'AAPL', action: 'SELL', orderType: 'STP', totalQuantity: 10, auxPrice: 90 })
+      const ctx = makeRiskContext({ operation: entry, siblingOperations: [entry, stop] })
+      expect(r14StopRequired.check(ctx)).toBeNull()
+    })
+    it('still blocks when the sibling covers a DIFFERENT symbol', () => {
+      const entry = makePlaceOrder({ symbol: 'AAPL', action: 'BUY', orderType: 'MKT', totalQuantity: 10 })
+      const stop = makePlaceOrder({ symbol: 'MSFT', action: 'SELL', orderType: 'STP', totalQuantity: 10, auxPrice: 90 })
+      const ctx = makeRiskContext({ operation: entry, siblingOperations: [entry, stop] })
+      expect(r14StopRequired.check(ctx)?.code).toBe('R14')
+    })
+    it('still blocks when the sibling is the SAME side (not a covering stop)', () => {
+      const entry = makePlaceOrder({ symbol: 'AAPL', action: 'BUY', orderType: 'MKT', totalQuantity: 10 })
+      const notCovering = makePlaceOrder({ symbol: 'AAPL', action: 'BUY', orderType: 'STP', totalQuantity: 10, auxPrice: 90 })
+      const ctx = makeRiskContext({ operation: entry, siblingOperations: [entry, notCovering] })
+      expect(r14StopRequired.check(ctx)?.code).toBe('R14')
+    })
+    it('still blocks when the sibling stop quantity is less than the entry', () => {
+      const entry = makePlaceOrder({ symbol: 'AAPL', action: 'BUY', orderType: 'MKT', totalQuantity: 10 })
+      const partialStop = makePlaceOrder({ symbol: 'AAPL', action: 'SELL', orderType: 'STP', totalQuantity: 5, auxPrice: 90 })
+      const ctx = makeRiskContext({ operation: entry, siblingOperations: [entry, partialStop] })
+      expect(r14StopRequired.check(ctx)?.code).toBe('R14')
+    })
+    it('still blocks with no siblingOperations at all (unit-test caller outside TradingGit) unless attached/self-stop', () => {
+      const entry = makePlaceOrder({ symbol: 'AAPL', action: 'BUY', orderType: 'MKT', totalQuantity: 10 })
+      expect(r14StopRequired.check(makeRiskContext({ operation: entry }))?.code).toBe('R14')
+    })
   })
 })
 

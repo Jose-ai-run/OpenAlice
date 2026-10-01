@@ -24,6 +24,29 @@
       "maxQuoteAgeSeconds": 30,
       "maxConsecutiveRejects": 5,
       "maxSpreadBps": 50
+    },
+    "engine-paper": {
+      "allowedActions": ["placeOrder", "modifyOrder", "closePosition", "cancelOrder"],
+      "tradingHours": "always",
+      "requireStopLoss": true,
+      "maxOrderNotional": 5000,
+      "maxPositionNotional": 20000,
+      "maxPositionPctEquity": 25,
+      "maxGrossExposurePctEquity": 100,
+      "maxNetExposurePctEquity": 75,
+      "maxLeverage": 3,
+      "maxOpenPositions": 10,
+      "maxTradesPerDay": 20,
+      "maxTradesPerSymbolPerDay": 5,
+      "cooldownSecondsPerSymbol": 60,
+      "maxRiskPerTradePctEquity": 1,
+      "maxDailyLossPctEquity": 3,
+      "maxDrawdownPctFromHWM": 10,
+      "priceBandPct": 5,
+      "maxQuoteAgeSeconds": 30,
+      "maxConsecutiveRejects": 5,
+      "maxSpreadBps": 50,
+      "allowSyntheticQuotes": true
     }
   }
 }

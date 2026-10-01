@@ -35,9 +35,10 @@ import { startOrderSyncPoller } from './domain/trading/order-sync-poller.js'
 import { buildKeylessDataUTAs } from './domain/trading/keyless-data-sources.js'
 import { createTradingRoutes } from './http/routes-trading.js'
 import { createSimulatorRoutes } from './http/routes-simulator.js'
-import { createRiskRoutes } from './http/routes-risk.js'
+import { createRiskRoutes, createEngineLeaseRoutes } from './http/routes-risk.js'
 import { utaAuthMiddleware } from './http/auth.js'
 import { engineAccountGuard } from './http/engine-account-guard.js'
+import { engineFencing } from './http/engine-fencing.js'
 import { checkRiskEngineDeploymentSafety } from './domain/trading/risk/deployment-safety.js'
 import {
   checkUtaAuthDeploymentSafety,
@@ -229,6 +230,13 @@ export async function startUTAService(): Promise<void> {
   // [PROPUESTA] Fase 4d (S1) — after auth, so it can read c.get('utaAuth').
   // Only gates stage/commit on accounts the RO policy marks engineOwned.
   app.use('/api/trading/*', engineAccountGuard())
+  // [PROPUESTA] ADR-0009 (A6, F7) — after auth too, same reason. Scoped to
+  // /api/trading/uta/* only (the wallet write routes the ADR names), NOT
+  // /api/trading/risk/* — fencing a lease-ACQUISITION call would be a
+  // chicken-and-egg bug (no epoch exists yet to present). Only fences a
+  // caller whose token carries scope `engine`; everyone else (including
+  // engineAccountGuard's own stage/commit checks above) is unaffected.
+  app.use('/api/trading/uta/*', engineFencing())
 
   app.route('/api/trading', createTradingRoutes(tradingCtx))
   // Simulator endpoints — MockBroker-only god-view operations the
@@ -241,6 +249,11 @@ export async function startUTAService(): Promise<void> {
   // already specified. Falls back to 'operator' scope via auth.ts's
   // unmatched-route default — no new SCOPE_RULES entry needed.
   app.route('/api/risk', createRiskRoutes(tradingCtx))
+  // [PROPUESTA] ADR-0009 (A6, F7) — POST /api/trading/risk/engine-lease,
+  // the exact path the ADR specifies. Mounted under /api/trading so the
+  // auth/fencing middleware above already covers it (fencing itself
+  // no-ops here since acquiring a lease has no epoch to present yet).
+  app.route('/api/trading/risk', createEngineLeaseRoutes())
 
   // ==================== Bind + shutdown ====================
 

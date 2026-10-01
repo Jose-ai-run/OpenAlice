@@ -149,6 +149,7 @@ export async function evaluateRisk(operation: Operation, deps: RiskEngineDeps): 
   const ctx: RiskContext = {
     accountId, operation, policy: accountPolicy, policyHash,
     positions, account, state, quote, marketClock, currentOrder, now,
+    siblingOperations: correlation?.allOperations,
   }
 
   for (const rule of RULE_CHAIN) {

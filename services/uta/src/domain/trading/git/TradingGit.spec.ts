@@ -39,6 +39,7 @@ function makeConfig(overrides: Partial<TradingGitConfig> = {}): TradingGitConfig
     }),
     getGitState: overrides.getGitState ?? vi.fn().mockResolvedValue(makeGitState()),
     onCommit: overrides.onCommit,
+    onPendingChange: overrides.onPendingChange,
   }
 }
 
@@ -54,6 +55,16 @@ function buyOp(symbol = 'AAPL'): Operation {
 function sellOp(symbol = 'AAPL'): Operation {
   const contract = makeContract({ symbol })
   return { action: 'closePosition', contract }
+}
+
+function stopOp(symbol = 'AAPL', action: 'BUY' | 'SELL' = 'SELL'): Operation {
+  const contract = makeContract({ symbol })
+  const order = new Order()
+  order.action = action
+  order.orderType = 'STP'
+  order.totalQuantity = new Decimal(10)
+  order.auxPrice = new Decimal(90)
+  return { action: 'placeOrder', contract, order }
 }
 
 // ==================== Tests ====================
@@ -1127,6 +1138,151 @@ describe('TradingGit', () => {
       const result = await simGit.simulatePriceChange([{ symbol: 'AAPL', change: 'bad' }])
       expect(result.success).toBe(false)
       expect(result.error).toContain('Invalid change format')
+    })
+  })
+
+  // ==================== M5 — staged/pending state persisted + restored ====================
+  describe('onPendingChange + restore (Hito 1 Parte 2, F7, M5)', () => {
+    it('fires onPendingChange with the staged batch on add(), and with null after a successful push', async () => {
+      const onPendingChange = vi.fn()
+      const g = new TradingGit(makeConfig({ onPendingChange }))
+
+      g.add(buyOp())
+      expect(onPendingChange).toHaveBeenLastCalledWith(
+        expect.objectContaining({ stagingArea: expect.any(Array), pendingMessage: null, pendingHash: null }),
+      )
+
+      const { hash } = g.commit('buy AAPL')
+      expect(onPendingChange).toHaveBeenLastCalledWith(
+        expect.objectContaining({ pendingMessage: 'buy AAPL', pendingHash: hash }),
+      )
+
+      await g.push(hash)
+      expect(onPendingChange).toHaveBeenLastCalledWith(null)
+    })
+
+    it('fires onPendingChange with null after reject()', async () => {
+      const onPendingChange = vi.fn()
+      const g = new TradingGit(makeConfig({ onPendingChange }))
+      g.add(buyOp())
+      const { hash } = g.commit('buy AAPL')
+      onPendingChange.mockClear()
+
+      await g.reject(undefined, hash)
+      expect(onPendingChange).toHaveBeenCalledWith(null)
+    })
+
+    it('restore() seeds stagingArea/pendingMessage/pendingHash from a persisted pending batch, and push() works from it', async () => {
+      const g1 = new TradingGit(makeConfig())
+      g1.add(buyOp())
+      const { hash } = g1.commit('buy AAPL — pre-crash')
+      const persistedPending = {
+        stagingArea: JSON.parse(JSON.stringify([buyOp()])).map((op: Operation) => {
+          // Round-trip through plain JSON like the real file would, then let
+          // restore() rehydrate it — mirrors what loadPendingState() returns.
+          return op
+        }),
+        pendingMessage: 'buy AAPL — pre-crash',
+        pendingHash: hash,
+      }
+
+      const executeOperation = vi.fn().mockResolvedValue({ success: true, orderId: 'order-1' })
+      const g2 = TradingGit.restore(
+        { commits: [], head: null },
+        makeConfig({ executeOperation }),
+        persistedPending,
+      )
+
+      expect(g2.status()).toMatchObject({ pendingMessage: 'buy AAPL — pre-crash', pendingHash: hash })
+
+      const pushResult = await g2.push(hash)
+      expect(pushResult.hash).toBe(hash)
+      expect(executeOperation).toHaveBeenCalledTimes(1)
+    })
+
+    it('restore() with no pending argument behaves exactly as before (no staging, no pending)', () => {
+      const g = TradingGit.restore({ commits: [], head: null }, makeConfig())
+      expect(g.status()).toMatchObject({ staged: [], pendingMessage: null, pendingHash: null })
+    })
+  })
+
+  // ==================== 1c — stop-fail atomicity (AUDIT.md §19, item 1c) ====================
+  describe('stop-fail atomicity: entry succeeds, protective stop in the same commit fails', () => {
+    it('auto-closes the position reduce-only and appends the close as an extra operation/result in the SAME commit', async () => {
+      const executeOperation = vi.fn(async (op: Operation) => {
+        if (op.action === 'placeOrder' && op.order.orderType === 'MKT') {
+          return { success: true, orderId: 'entry-1' }
+        }
+        if (op.action === 'placeOrder' && op.order.orderType === 'STP') {
+          return { success: false, error: 'simulated stop failure' }
+        }
+        if (op.action === 'closePosition') {
+          return { success: true, orderId: 'auto-close-1' }
+        }
+        throw new Error(`unexpected op in test: ${JSON.stringify(op)}`)
+      })
+      const g = new TradingGit(makeConfig({ executeOperation }))
+      g.add(buyOp('AAPL'))
+      g.add(stopOp('AAPL', 'SELL'))
+      const { hash } = g.commit('entry + stop, stop will fail')
+
+      const pushResult = await g.push(hash)
+
+      // 3 results: entry (success), stop (failed), auto-close (synthetic, success).
+      expect(pushResult.submitted.map((r) => r.action)).toEqual(['placeOrder', 'closePosition'])
+      expect(pushResult.rejected.map((r) => r.action)).toEqual(['placeOrder'])
+      expect(executeOperation).toHaveBeenCalledTimes(3)
+      const lastCall = executeOperation.mock.calls[2]!
+      expect(lastCall[0]).toEqual({ action: 'closePosition', contract: expect.objectContaining({ symbol: 'AAPL' }) })
+    })
+
+    it('does NOT auto-close when the entry itself failed (nothing opened, nothing to protect)', async () => {
+      const executeOperation = vi.fn(async (op: Operation) => {
+        if (op.action === 'placeOrder' && op.order.orderType === 'MKT') return { success: false, error: 'entry failed' }
+        if (op.action === 'placeOrder' && op.order.orderType === 'STP') return { success: false, error: 'stop failed too' }
+        throw new Error(`unexpected op in test: ${JSON.stringify(op)}`)
+      })
+      const g = new TradingGit(makeConfig({ executeOperation }))
+      g.add(buyOp('AAPL'))
+      g.add(stopOp('AAPL', 'SELL'))
+      const { hash } = g.commit('both fail')
+
+      await g.push(hash)
+      expect(executeOperation).toHaveBeenCalledTimes(2)  // no synthetic 3rd call
+    })
+
+    it('does NOT auto-close when the stop succeeds (the normal path)', async () => {
+      const executeOperation = vi.fn(async () => ({ success: true, orderId: 'ok' }))
+      const g = new TradingGit(makeConfig({ executeOperation }))
+      g.add(buyOp('AAPL'))
+      g.add(stopOp('AAPL', 'SELL'))
+      const { hash } = g.commit('both succeed')
+
+      await g.push(hash)
+      expect(executeOperation).toHaveBeenCalledTimes(2)  // no synthetic 3rd call
+    })
+
+    it('logs an alert (console.error) when the stop fails, and a second alert if the auto-close ALSO fails', async () => {
+      const alertSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      try {
+        const executeOperation = vi.fn(async (op: Operation) => {
+          if (op.action === 'placeOrder' && op.order.orderType === 'MKT') return { success: true, orderId: 'entry-1' }
+          if (op.action === 'placeOrder' && op.order.orderType === 'STP') return { success: false, error: 'stop failed' }
+          if (op.action === 'closePosition') throw new Error('broker is down')
+          throw new Error('unexpected')
+        })
+        const g = new TradingGit(makeConfig({ executeOperation }))
+        g.add(buyOp('AAPL'))
+        g.add(stopOp('AAPL', 'SELL'))
+        const { hash } = g.commit('stop fails, auto-close also fails')
+        await g.push(hash)
+
+        expect(alertSpy).toHaveBeenCalledTimes(2)
+        expect(alertSpy.mock.calls[0]![0]).toContain('[ALERT]')
+        expect(alertSpy.mock.calls[1]![0]).toContain('ALSO FAILED')
+      } finally {
+        alertSpy.mockRestore()
+      }
     })
   })
 })

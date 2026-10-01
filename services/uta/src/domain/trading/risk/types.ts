@@ -29,6 +29,14 @@ export interface RiskContext {
   /** For modifyOrder only — the order's CURRENT state, resolved via broker.getOrders([orderId]) before rules run. Absent = R18 fails closed. */
   currentOrder?: { totalQuantity: Decimal; auxPrice: Decimal; lmtPrice: Decimal; contract: Contract }
   now: Date
+  /**
+   * [PROPUESTA] Hito 1 Parte 2 (AUDIT.md §19, item 1b) — every operation in
+   * the SAME commit as `operation`, threaded from
+   * `OperationExecutionContext.allOperations`. Absent when a caller invokes
+   * `evaluateRisk` outside `TradingGit.executePush()` (unit tests) — R14
+   * treats that the same as "no sibling found", not fail-open.
+   */
+  siblingOperations?: readonly Operation[]
 }
 
 export interface RiskRuleRejection {

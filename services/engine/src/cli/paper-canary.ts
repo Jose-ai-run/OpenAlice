@@ -44,10 +44,6 @@ interface OpenPosition { side: 'long' | 'short'; entry: number; stop: number }
 function sideToAction(side: 'long' | 'short'): 'BUY' | 'SELL' {
   return side === 'long' ? 'BUY' : 'SELL'
 }
-function protectiveStopAction(side: 'long' | 'short'): 'BUY' | 'SELL' {
-  // Closing a long = SELL; closing a short = BUY (opposite of the entry action).
-  return side === 'long' ? 'SELL' : 'BUY'
-}
 
 async function utaFetch(baseUrl: string, path: string, init?: RequestInit): Promise<{ status: number; ok: boolean; body: unknown }> {
   const res = await fetch(`${baseUrl}${path}`, {
@@ -177,30 +173,18 @@ async function main(): Promise<void> {
   const qty = sizeOrder(enterDecision.entry, enterDecision.stop)
   console.log(`[canary] qty (maxOrderNotional/maxRiskPerTradePctEquity) = ${qty}`)
 
-  // R14 ("stop obligatorio") evaluates each operation independently — it has
-  // no cross-operation awareness of a sibling STP order in the same commit,
-  // so the entry's own `stopLoss` must be attached here for R14 to allow it
-  // (confirmed by a real rejection on the first attempt against this exact
-  // policy — see docs/trading-engine/AUDIT.md §18). MockBroker itself
-  // ignores `tpsl` (confirmed by code inspection: it only appears in the
-  // call-log recorder, never acted on) — it ONLY satisfies R14's risk
-  // check; the actual protective mechanism is the separate real STP order
-  // staged right after it, which MockBroker genuinely matches against
-  // later mark-price updates.
+  // AUDIT.md §19 (fixes applied after the first canary run's real
+  // findings): R12/R13 now exempt protective-stop orders, R14 recognizes a
+  // covering sibling stop in the same commit, and MockBroker genuinely acts
+  // on an attached `tpsl.stopLoss` (creates a real resting STP leg
+  // server-side instead of recording-and-ignoring it). One commit, no
+  // separate stop-staging step, no cooldown wait: the entry alone is both
+  // sufficient for R14 and sufficient to actually protect the position.
   const entryStageBody = { aliceId: paperId, action: sideToAction(enterDecision.side), orderType: 'MKT', totalQuantity: qty, stopLoss: { price: String(enterDecision.stop) } }
-  const stopStageBody = { aliceId: paperId, action: protectiveStopAction(enterDecision.side), orderType: 'STP', totalQuantity: qty, auxPrice: String(enterDecision.stop) }
 
   const stageEntry = await utaFetch(utaBaseUrl, `/api/trading/uta/${paperAccountId}/wallet/stage-place-order`, { method: 'POST', body: JSON.stringify(entryStageBody) })
   if (!stageEntry.ok) throw new Error(`stage-place-order (entrada) falló — símbolo sin mapeo válido en ${paperAccountId} o error real: ${JSON.stringify(stageEntry.body)}`)
-  console.log(`[canary] staged entrada MKT: ${JSON.stringify(stageEntry.body)}`)
-
-  // The protective STP order is pushed in a SEPARATE, later commit — real
-  // finding (AUDIT.md §18): R13 (cooldown) fires per symbol per push with no
-  // exception for a protective stop, so staging it in the SAME commit as the
-  // entry got it rejected by R13 immediately after the entry's own push set
-  // the cooldown. Staging it here only, now, and committing+pushing it after
-  // the real cooldownSecondsPerSymbol window elapses avoids that — it does
-  // not route around R13, it simply waits for it like any other caller would.
+  console.log(`[canary] staged entrada MKT (con stopLoss adjunto real): ${JSON.stringify(stageEntry.body)}`)
 
   const commitEntry = await utaFetch(utaBaseUrl, `/api/trading/uta/${paperAccountId}/wallet/commit`, {
     method: 'POST',
@@ -219,27 +203,18 @@ async function main(): Promise<void> {
   }
   console.log(`[canary] reinicio a mitad de ciclo simulado: el reintento de stage fue RECHAZADO (HTTP ${restartStage.status}: ${JSON.stringify(restartStage.body)}) — pendingHash sigue siendo ${statusBody1.pendingHash} — CERO duplicados.`)
 
+  const entryPushedAt = Date.now()
   const pushEntry = await utaFetch(utaBaseUrl, `/api/trading/uta/${paperAccountId}/wallet/push`, { method: 'POST', body: JSON.stringify({ expectedPendingHash: pendingHash1 }) })
   if (!pushEntry.ok) throw new Error(`push (entrada) falló: ${JSON.stringify(pushEntry.body)}`)
-  console.log(`[canary] ENTRADA pusheada — commit real en TradingGit: ${JSON.stringify(pushEntry.body)}`)
+  console.log(`[canary] ENTRADA pusheada — commit real en TradingGit, con su stop protector real ya armado server-side: ${JSON.stringify(pushEntry.body)}`)
 
-  const cooldownSeconds = 65
-  console.log(`[canary] esperando ${cooldownSeconds}s reales (R13 cooldownSecondsPerSymbol=60 de la política) antes de armar el stop protector en un commit separado...`)
-  await new Promise((r) => setTimeout(r, cooldownSeconds * 1000))
-
-  const stageStop = await utaFetch(utaBaseUrl, `/api/trading/uta/${paperAccountId}/wallet/stage-place-order`, { method: 'POST', body: JSON.stringify(stopStageBody) })
-  if (!stageStop.ok) throw new Error(`stage-place-order (stop protector) falló: ${JSON.stringify(stageStop.body)}`)
-  console.log(`[canary] staged stop protector STP (commit separado): ${JSON.stringify(stageStop.body)}`)
-  const commitStop = await utaFetch(utaBaseUrl, `/api/trading/uta/${paperAccountId}/wallet/commit`, {
-    method: 'POST', body: JSON.stringify({ message: `[canary] ${entry.label} stop protector armado @ ${enterDecision.stop}` }),
-  })
-  if (!commitStop.ok) throw new Error(`commit (stop protector) falló: ${JSON.stringify(commitStop.body)}`)
-  const pendingHashStop = (commitStop.body as { hash: string }).hash
-  const pushStop = await utaFetch(utaBaseUrl, `/api/trading/uta/${paperAccountId}/wallet/push`, { method: 'POST', body: JSON.stringify({ expectedPendingHash: pendingHashStop }) })
-  if (!pushStop.ok) throw new Error(`push (stop protector) falló: ${JSON.stringify(pushStop.body)}`)
-  console.log(`[canary] STOP PROTECTOR pusheado — commit real en TradingGit: ${JSON.stringify(pushStop.body)}`)
-  const stopPushResults = (pushStop.body as { results?: Array<{ orderId?: string }> }).results ?? []
-  const stopOrderId = stopPushResults[0]?.orderId
+  const stateAfterEntry = await utaFetch(utaBaseUrl, `/api/simulator/uta/${paperAccountId}/state`, { method: 'GET' })
+  const pendingOrdersAfterEntry = (stateAfterEntry.body as { pendingOrders?: Array<{ orderId: string; orderType: string }> }).pendingOrders ?? []
+  const secondsWithoutStop = (Date.now() - entryPushedAt) / 1000
+  console.log(`[canary] segundos de posición sin stop tras el push: ${secondsWithoutStop.toFixed(3)}s — stop real ya pendiente: ${JSON.stringify(pendingOrdersAfterEntry)}`)
+  if (pendingOrdersAfterEntry.length === 0) {
+    throw new Error('[canary] FALLO: la posición quedó abierta sin ningún stop pendiente tras el push de la entrada.')
+  }
   console.log('')
 
   // ==================== 3b: replay real — EXIT ====================
@@ -259,6 +234,7 @@ async function main(): Promise<void> {
     await feeder.setMarkPrice(paperAccountId, nativeKey, String(exitPrice))
     console.log(`[canary] markPrice(${paperAccountId}, ${nativeKey}) = ${exitPrice}`)
 
+    const stopOrderId = pendingOrdersAfterEntry.find((o) => o.orderType === 'STP')?.orderId
     if (stopOrderId) {
       const cancelStop = await utaFetch(utaBaseUrl, `/api/trading/uta/${paperAccountId}/wallet/stage-cancel-order`, {
         method: 'POST', body: JSON.stringify({ orderId: stopOrderId }),

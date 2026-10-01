@@ -23,6 +23,7 @@ import type {
   GitState,
   CommitLogEntry,
   GitExportState,
+  PendingGitState,
   OperationSummary,
   PriceChangeInput,
   SimulatePriceChangeResult,
@@ -30,6 +31,7 @@ import type {
   SyncResult,
 } from './types.js'
 import { getOperationSymbol } from './types.js'
+import { isProtectiveStopOrder } from '../risk/rules/shared.js'
 
 /** secTypes whose price does NOT track the underlying 1:1 — excluded from
  *  symbol-level price simulation (they share the underlying's symbol). */
@@ -84,6 +86,7 @@ export class TradingGit implements ITradingGit {
       )
     }
     this.stagingArea.push(operation)
+    this._firePendingChange()
     return {
       staged: true,
       index: this.stagingArea.length - 1,
@@ -107,6 +110,7 @@ export class TradingGit implements ITradingGit {
       parentHash: this.head,
     })
     this.pendingMessage = message
+    this._firePendingChange()
 
     return {
       prepared: true,
@@ -114,6 +118,23 @@ export class TradingGit implements ITradingGit {
       message,
       operationCount: this.stagingArea.length,
     }
+  }
+
+  /**
+   * [PROPUESTA] Hito 1 Parte 2, F7 (M5) — `add()`/`commit()` are
+   * synchronous public API (ITradingGit), so this is fire-and-forget, not
+   * awaited. Safe under this class's own documented invariant (one
+   * in-flight write at a time per account, enforced by `inflightWrite` /
+   * the single-pending-commit rule) — there is never a second concurrent
+   * call that could race with this persist. `push()`/`reject()` below
+   * await the equivalent call since clearing to `null` is on their
+   * already-async path.
+   */
+  private _firePendingChange(): void {
+    const pending: PendingGitState | null = this.stagingArea.length > 0
+      ? { stagingArea: [...this.stagingArea], pendingMessage: this.pendingMessage, pendingHash: this.pendingHash }
+      : null
+    void this.config.onPendingChange?.(pending)
   }
 
   async push(expectedPendingHash: string): Promise<PushResult> {
@@ -143,7 +164,7 @@ export class TradingGit implements ITradingGit {
     for (let operationIndex = 0; operationIndex < operations.length; operationIndex++) {
       const op = operations[operationIndex]!
       try {
-        const raw = await this.config.executeOperation(op, { commitHash: hash, operationIndex })
+        const raw = await this.config.executeOperation(op, { commitHash: hash, operationIndex, allOperations: operations })
         results.push(this.parseOperationResult(op, raw))
       } catch (error) {
         results.push({
@@ -153,6 +174,51 @@ export class TradingGit implements ITradingGit {
           error: error instanceof Error ? error.message : String(error),
         })
       }
+    }
+
+    // [PROPUESTA] Hito 1 Parte 2, AUDIT.md §19 item 1c — atomicity: if a
+    // protective-stop operation in THIS commit failed/was rejected AFTER
+    // its entry (an earlier operation in the same commit, same symbol,
+    // opposite side) already succeeded, the position is now open with no
+    // stop. Close it immediately (reduce-only, market) and alert — never
+    // leave it unprotected waiting for a human or the next cycle to
+    // notice. Appends a synthetic closePosition operation + result to
+    // THIS SAME commit (operations/results stay parallel arrays) rather
+    // than a silent side effect, so the auto-close is visible in the
+    // commit's own history, not just a log line.
+    for (let i = 0; i < operations.length; i++) {
+      const stopOp = operations[i]!
+      if (stopOp.action !== 'placeOrder' || !isProtectiveStopOrder(stopOp) || results[i]!.success) continue
+      const stopSymbol = stopOp.contract.localSymbol || stopOp.contract.symbol
+      const entryIndex = operations.findIndex((candidate, j) =>
+        j < i && candidate.action === 'placeOrder' && results[j]!.success &&
+        (candidate.contract.localSymbol || candidate.contract.symbol) === stopSymbol &&
+        candidate.order.action !== stopOp.order.action,
+      )
+      if (entryIndex < 0) continue
+      const entryOp = operations[entryIndex] as Extract<Operation, { action: 'placeOrder' }>
+
+      console.error(
+        `[ALERT] TradingGit[${hash}]: protective stop for ${stopSymbol} failed/rejected after its entry already executed ` +
+        `(entry op#${entryIndex}, stop op#${i}: ${results[i]!.error ?? 'unknown error'}). Closing the position immediately (reduce-only).`,
+      )
+
+      const autoClose: Operation = { action: 'closePosition', contract: entryOp.contract }
+      let autoCloseResult: OperationResult
+      try {
+        const raw = await this.config.executeOperation(autoClose, { commitHash: hash, operationIndex: operations.length, allOperations: operations })
+        autoCloseResult = this.parseOperationResult(autoClose, raw)
+      } catch (error) {
+        autoCloseResult = {
+          action: autoClose.action,
+          success: false,
+          status: 'rejected',
+          error: error instanceof Error ? error.message : String(error),
+        }
+        console.error(`[ALERT] TradingGit[${hash}]: automatic reduce-only close of ${stopSymbol} ALSO FAILED — position may still be open and unprotected: ${autoCloseResult.error}`)
+      }
+      operations.push(autoClose)
+      results.push(autoCloseResult)
     }
 
     // Snapshot state after execution
@@ -178,6 +244,7 @@ export class TradingGit implements ITradingGit {
     this.stagingArea = []
     this.pendingMessage = null
     this.pendingHash = null
+    await this.config.onPendingChange?.(null)
 
     const rejected = results.filter((r) => !r.success)
     const submitted = results.filter((r) => r.success)
@@ -235,6 +302,7 @@ export class TradingGit implements ITradingGit {
     this.stagingArea = []
     this.pendingMessage = null
     this.pendingHash = null
+    await this.config.onPendingChange?.(null)
 
     return { hash, message, operationCount: operations.length }
   }
@@ -570,10 +638,22 @@ export class TradingGit implements ITradingGit {
     }
   }
 
-  static restore(state: GitExportState, config: TradingGitConfig): TradingGit {
+  /**
+   * [PROPUESTA] Hito 1 Parte 2, F7 (M5) — `pending` restores a
+   * staged-but-not-yet-pushed batch from `data/trading/<id>/pending.json`,
+   * surviving a crash between `commit()` and `push()`. Omitted/undefined
+   * means no pending state was ever persisted (the common case) —
+   * byte-identical to before this parameter existed.
+   */
+  static restore(state: GitExportState, config: TradingGitConfig, pending?: PendingGitState | null): TradingGit {
     const git = new TradingGit(config)
     git.commits = state.commits.map(TradingGit.rehydrateCommit)
     git.head = state.head
+    if (pending) {
+      git.stagingArea = pending.stagingArea.map(TradingGit.rehydrateOperation)
+      git.pendingMessage = pending.pendingMessage
+      git.pendingHash = pending.pendingHash
+    }
     return git
   }
 

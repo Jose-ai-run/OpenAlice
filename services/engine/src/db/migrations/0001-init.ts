@@ -6,6 +6,7 @@
  * incrementally per mode.
  */
 import type { Migration } from '../migrate.js'
+import { migration0002CounterfactualTrades } from './0002-counterfactual-trades.js'
 
 export const migration0001Init: Migration = {
   id: 1,
@@ -64,4 +65,4 @@ export const migration0001Init: Migration = {
   },
 }
 
-export const migrations = [migration0001Init]
+export const migrations = [migration0001Init, migration0002CounterfactualTrades]

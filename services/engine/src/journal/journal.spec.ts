@@ -115,4 +115,25 @@ describe('Journal', () => {
     }
     expect(journal.recentDecisions(2)).toHaveLength(2)
   })
+
+  it('recordCounterfactualTrade persists a blocked signal (AUDIT.md §19, item 2)', () => {
+    const journal = makeJournal()
+    const cycleId = journal.startCycle({
+      mode: 'PAPER', interval: '1h',
+      candleCloseAt: new Date('2026-09-27T15:00:00.000Z'), startedAt: new Date(),
+    })
+    const decisionId = journal.recordDecision({
+      cycleId, symbol: 'BTC/USDT:USDT', aliceId: 'bybit-readonly|BTC/USDT:USDT',
+      strategyId: 'trend-following', strategyVersion: '0.1.0',
+      decision: { kind: 'ENTER', side: 'long', entry: 100, stop: 95, score: 0.5, reasonCodes: [] },
+      createdAt: new Date(),
+    })
+    const id = journal.recordCounterfactualTrade({
+      decisionId, symbol: 'BTC/USDT:USDT', aliceId: 'bybit-readonly|BTC/USDT:USDT',
+      side: 'BUY', wouldBeEntry: '100', wouldBeStop: '95', wouldBeQty: '0.01',
+      blockedBy: 'R16', blockedReason: 'daily loss halt', bid: '99.9', ask: '100.1', spread: '0.2',
+      now: new Date(),
+    })
+    expect(id).toBeGreaterThan(0)
+  })
 })

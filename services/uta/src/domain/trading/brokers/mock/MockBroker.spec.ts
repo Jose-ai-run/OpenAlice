@@ -728,3 +728,168 @@ describe('short positions — netLiquidation aggregation', () => {
     expect(account.unrealizedPnL).toBe('200')
   })
 })
+
+// ==================== M10 + A7b: real bid/ask/spread, slippage, fees — AUDIT.md §19, item 2 ====================
+
+describe('M10 + A7b: spread/slippage/fee fill pricing', () => {
+  it('default (spreadBps=0, slippageBps=0, feeBps=0) fills exactly at markPrice — byte-identical to before this option existed', async () => {
+    const b = new MockBroker({ cash: 100_000 })
+    b.setMarkPrice('BTC', '100')
+    const contract = makeContract({ aliceId: 'mock-paper|BTC', symbol: 'BTC' })
+    const order = Object.assign(new Order(), { action: 'BUY', orderType: 'MKT', totalQuantity: new Decimal('1') })
+    await b.placeOrder(contract, order)
+    const positions = await b.getPositions()
+    expect(positions[0].avgCost.toString()).toBe('100')
+  })
+
+  it('buys at the ask (above mid) and sells at the bid (below mid) per spreadBps', async () => {
+    const b = new MockBroker({ cash: 1_000_000, spreadBps: 100 })  // 1% half-spread
+    b.setMarkPrice('BTC', '100')
+    const contract = makeContract({ aliceId: 'mock-paper|BTC', symbol: 'BTC' })
+
+    const buy = Object.assign(new Order(), { action: 'BUY', orderType: 'MKT', totalQuantity: new Decimal('1') })
+    await b.placeOrder(contract, buy)
+    let positions = await b.getPositions()
+    expect(positions[0].avgCost.toString()).toBe('101')  // ask = 100 * 1.01
+
+    await b.closePosition(contract)  // sells at the bid
+    const cashAfterRoundTrip = (await b.getAccount()).totalCashValue
+    // bought 1 @ 101 (-101), sold 1 @ 99 (+99) → net -2 vs starting cash
+    expect(new Decimal(cashAfterRoundTrip).toString()).toBe('999998')
+  })
+
+  it('slippageBps pushes the fill further unfavorable on top of the spread', async () => {
+    const b = new MockBroker({ cash: 1_000_000, spreadBps: 100, slippageBps: 50 })
+    b.setMarkPrice('BTC', '100')
+    const contract = makeContract({ aliceId: 'mock-paper|BTC', symbol: 'BTC' })
+    const buy = Object.assign(new Order(), { action: 'BUY', orderType: 'MKT', totalQuantity: new Decimal('1') })
+    await b.placeOrder(contract, buy)
+    const positions = await b.getPositions()
+    // ask = 101, +0.5% slippage on 101 = 100.505 → 101.505
+    expect(positions[0].avgCost.toString()).toBe('101.505')
+  })
+
+  it('feeBps charges a fee on notional regardless of side', async () => {
+    const b = new MockBroker({ cash: 100_000, feeBps: 10 })  // 0.10%
+    b.setMarkPrice('BTC', '100')
+    const contract = makeContract({ aliceId: 'mock-paper|BTC', symbol: 'BTC' })
+    const buy = Object.assign(new Order(), { action: 'BUY', orderType: 'MKT', totalQuantity: new Decimal('10') })
+    await b.placeOrder(contract, buy)
+    // cost = 1000, fee = 1000 * 0.001 = 1 → cash = 100000 - 1000 - 1 = 98999
+    expect((await b.getAccount()).totalCashValue).toBe('98999')
+  })
+
+  it('getQuote reports the same real bid/ask the fill pricing uses', async () => {
+    const b = new MockBroker({ spreadBps: 100 })
+    b.setMarkPrice('BTC', '100')
+    const contract = makeContract({ aliceId: 'mock-paper|BTC', symbol: 'BTC' })
+    const quote = await b.getQuote(contract)
+    expect(quote.bid).toBe('99')
+    expect(quote.ask).toBe('101')
+  })
+})
+
+// ==================== Attached protective stop (tpsl) — AUDIT.md §19, item 1d ====================
+
+describe('attached protective stop (tpsl)', () => {
+  it('getCapabilities reports supportsAttachedProtectiveStop', () => {
+    expect(broker.getCapabilities().supportsAttachedProtectiveStop).toBe(true)
+  })
+
+  it('a MKT entry with tpsl.stopLoss creates a real resting STP order on the opposite side, same qty', async () => {
+    broker.setMarkPrice('BTC', '100')
+    const contract = makeContract({ aliceId: 'mock-paper|BTC', symbol: 'BTC' })
+    const order = new Order()
+    order.action = 'BUY'
+    order.orderType = 'MKT'
+    order.totalQuantity = new Decimal('1')
+
+    const result = await broker.placeOrder(contract, order, { stopLoss: { price: '90' } })
+    expect(result.success).toBe(true)
+
+    const state = broker.getSimulatorState()
+    expect(state.pendingOrders).toHaveLength(1)
+    expect(state.pendingOrders[0]).toMatchObject({ nativeKey: 'BTC', action: 'SELL', orderType: 'STP', totalQuantity: '1', auxPrice: '90' })
+  })
+
+  it('the attached stop genuinely fills when the real mark price crosses it — not just recorded and ignored', async () => {
+    broker.setMarkPrice('BTC', '100')
+    const contract = makeContract({ aliceId: 'mock-paper|BTC', symbol: 'BTC' })
+    const order = new Order()
+    order.action = 'BUY'
+    order.orderType = 'MKT'
+    order.totalQuantity = new Decimal('1')
+    await broker.placeOrder(contract, order, { stopLoss: { price: '90' } })
+
+    broker.setMarkPrice('BTC', '90')  // price drops to the stop
+
+    const positions = await broker.getPositions()
+    expect(positions).toHaveLength(0)  // closed by the real STP fill
+  })
+
+  it('tpsl.takeProfit also creates a real resting LMT order on the opposite side', async () => {
+    broker.setMarkPrice('ETH', '100')
+    const contract = makeContract({ aliceId: 'mock-paper|ETH', symbol: 'ETH' })
+    const order = new Order()
+    order.action = 'BUY'
+    order.orderType = 'MKT'
+    order.totalQuantity = new Decimal('2')
+    await broker.placeOrder(contract, order, { takeProfit: { price: '120' } })
+
+    const state = broker.getSimulatorState()
+    expect(state.pendingOrders).toHaveLength(1)
+    expect(state.pendingOrders[0]).toMatchObject({ action: 'SELL', orderType: 'LMT', totalQuantity: '2', lmtPrice: '120' })
+  })
+})
+
+// ==================== Orphan protective stop never flips into a reverse position — AUDIT.md §19, item 1e ====================
+
+describe('orphan protective stop guard', () => {
+  it('cancelOrphanProtectiveLegs cancels a stop whose position was already closed another way', async () => {
+    broker.setMarkPrice('BTC', '100')
+    const contract = makeContract({ aliceId: 'mock-paper|BTC', symbol: 'BTC' })
+    const order = new Order()
+    order.action = 'BUY'
+    order.orderType = 'MKT'
+    order.totalQuantity = new Decimal('1')
+    await broker.placeOrder(contract, order, { stopLoss: { price: '90' } })
+
+    await broker.closePosition(contract)  // flat now, but the STP leg is still Submitted
+
+    const cancelled = broker.cancelOrphanProtectiveLegs()
+    expect(cancelled).toHaveLength(1)
+    expect(broker.getSimulatorState().pendingOrders).toHaveLength(0)
+  })
+
+  it('an orphaned SELL protective stop never fills and never flips into a short when its price is crossed', async () => {
+    broker.setMarkPrice('BTC', '100')
+    const contract = makeContract({ aliceId: 'mock-paper|BTC', symbol: 'BTC' })
+    const order = new Order()
+    order.action = 'BUY'
+    order.orderType = 'MKT'
+    order.totalQuantity = new Decimal('1')
+    await broker.placeOrder(contract, order, { stopLoss: { price: '90' } })
+    await broker.closePosition(contract)  // flat — the resting STP SELL @90 is now orphaned
+
+    broker.setMarkPrice('BTC', '90')  // crosses the orphan's trigger
+
+    const positions = await broker.getPositions()
+    expect(positions).toHaveLength(0)  // must stay flat — never a phantom short
+    expect(broker.getSimulatorState().pendingOrders).toHaveLength(0)  // the reactive guard cancelled it, didn't fill it
+  })
+
+  it('an orphaned BUY protective stop (covering a short) never fills and never flips into a long when its price is crossed', async () => {
+    broker.setMarkPrice('TSLA', '200')
+    const contract = makeContract({ aliceId: 'mock-paper|TSLA', symbol: 'TSLA' })
+    const shortEntry = Object.assign(new Order(), { action: 'SELL', orderType: 'MKT', totalQuantity: new Decimal('5') })
+    await broker.placeOrder(contract, shortEntry, { stopLoss: { price: '220' } })  // opens the short + attaches a real BUY STP @220 leg
+
+    await broker.closePosition(contract)  // flat — the resting BUY STP @220 is now orphaned
+
+    broker.setMarkPrice('TSLA', '220')  // crosses the orphan's trigger
+
+    const positions = await broker.getPositions()
+    expect(positions).toHaveLength(0)  // must stay flat — never a phantom long
+    expect(broker.getSimulatorState().pendingOrders).toHaveLength(0)
+  })
+})

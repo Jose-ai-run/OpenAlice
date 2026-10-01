@@ -17,7 +17,7 @@ describe('runMigrations', () => {
     runMigrations(db, migrations)
     expect(() => runMigrations(db, migrations)).not.toThrow()
     const count = db.prepare('SELECT COUNT(*) as n FROM migrations').get() as { n: number }
-    expect(count.n).toBe(1)
+    expect(count.n).toBe(migrations.length)
   })
 
   it('records applied migrations with a name and timestamp', () => {
@@ -62,5 +62,10 @@ describe('runMigrations', () => {
     expect((db.prepare('SELECT COUNT(*) as n FROM decisions').get() as { n: number }).n).toBe(1)
     expect((db.prepare('SELECT COUNT(*) as n FROM order_intents').get() as { n: number }).n).toBe(1)
     expect((db.prepare('SELECT COUNT(*) as n FROM order_events').get() as { n: number }).n).toBe(1)
+
+    db.prepare(`INSERT INTO counterfactual_trades (decision_id, symbol, alice_id, side, would_be_entry, would_be_stop, blocked_by, blocked_reason, created_at)
+                VALUES (?, 'BTC/USDT:USDT', 'bybit-readonly|BTC/USDT:USDT', 'BUY', '100', '95', 'R16', 'daily loss halt', '2026-09-27T15:00:19.000Z')`)
+      .run(decisionId.id)
+    expect((db.prepare('SELECT COUNT(*) as n FROM counterfactual_trades').get() as { n: number }).n).toBe(1)
   })
 })
