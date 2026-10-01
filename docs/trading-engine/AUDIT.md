@@ -1535,6 +1535,105 @@ corepack pnpm exec tsup src/main.ts --format esm --dts   # limpio (warning preex
 
 ---
 
+## 17. Escaneo de secretos (gitleaks) — 11 hallazgos upstream preexistentes — 2026-09-30
+
+### 17.1 Comando ejecutado
+
+Binario `gitleaks` v8.30.1 obtenido por descarga directa (Docker Desktop
+no respondía — `failed to connect to the docker API at
+npipe:////./pipe/dockerDesktopLinuxEngine` — con autorización explícita
+previa del usuario para usar esta vía de respaldo) desde la release
+oficial de GitHub, verificado contra el checksum SHA256 publicado en
+`gitleaks_8.30.1_checksums.txt` antes de ejecutarlo. Comando exacto,
+corrido desde la raíz del repo:
+
+```
+gitleaks.exe detect --source=. --log-opts="--branches" --report-format=json --report-path=report.json --exit-code=0 -v
+```
+
+`--log-opts="--branches"` escanea todas las refs de rama locales, no
+solo HEAD. Resultado: 3009 commits escaneados (~41.26 MB), **11
+hallazgos**, todos de la regla `generic-api-key`.
+
+Este es el comando a repetir antes de cada push (ver también §17.4 más
+abajo y el documento dedicado
+[[docs/trading-engine/SECRET-SCANNING.md]]).
+
+### 17.2 Clasificación mecánica — los 11 son UPSTREAM
+
+Para cada uno de los 6 commits únicos de origen de los 11 hallazgos, se
+ejecutó `git merge-base --is-ancestor <commit> 0d4faa90` (`0d4faa90` =
+commit auditado en la Fase 0, §7). Código de salida `0` = es ancestro =
+el hallazgo ya es público en TraderAlice/OpenAlice (y por tanto también
+en este fork) desde antes de que empezara este trabajo.
+
+| # | Commit | Archivo | Línea | ¿Ancestro de `0d4faa90`? |
+|---|---|---|---|---|
+| 1 | `bf86cec4` | `patches/@xterm__addon-webgl@0.20.0-beta.286.patch` | 6 | SÍ (exit 0) |
+| 2 | `bf86cec4` | `patches/@xterm__addon-webgl@0.20.0-beta.286.patch` | 7 | SÍ (exit 0) |
+| 3 | `569b7d83` | `patches/@xterm__xterm@6.1.0-beta.287.patch` | 6 | SÍ (exit 0) |
+| 4 | `569b7d83` | `patches/@xterm__xterm@6.1.0-beta.287.patch` | 7 | SÍ (exit 0) |
+| 5 | `93daccfa` | `packages/opentypebb/src/providers/eastmoney/models/equity-search.ts` | 23 | SÍ (exit 0) |
+| 6-7 | `8786a62c` | `src/webui/routes/trading-config.spec.ts` | 145 | SÍ (exit 0) |
+| 8 | `2310a5a1` | `src/domain/trading/brokers/presets.spec.ts` | 43 | SÍ (exit 0) |
+| 9 | `2310a5a1` | `src/domain/trading/brokers/others/leverup/LeverupBroker.spec.ts` | 17 | SÍ (exit 0) |
+| 10 | `2310a5a1` | `src/domain/trading/brokers/others/leverup/LeverupBroker.spec.ts` | 180 | SÍ (exit 0) |
+| 11 | `696a6ae0` | `src/ai-providers/vercel-ai-sdk/vercel-provider.spec.ts` | 61 | SÍ (exit 0) |
+
+**Los 11 son UPSTREAM**, confirmado mecánicamente, no por inferencia.
+Ninguno vive en un commit propio de esta sesión. Por diseño, ningún
+valor de secreto se reproduce en este documento ni en ningún otro
+artefacto del repo — solo commit/archivo/línea/regla.
+
+Forma/contexto de cada grupo (para que un revisor humano entienda el
+riesgo real sin necesidad del valor):
+
+- **#1-4** (parches de `xterm`): dentro de JS minificado/empaquetado de
+  terceros en archivos `pnpm patch` — falsos positivos por entropía
+  sobre código minificado.
+- **#5** (constante `TOKEN` en `equity-search.ts`): constante hexadecimal
+  de 32 caracteres hardcodeada, usada contra una API pública de
+  búsqueda (`searchapi.eastmoney.com`) — posible token de aplicación
+  público/no sensible, no confirmado con certeza. Ver
+  [[docs/trading-engine/UPSTREAM-agent-probe-auth-token.md]] §"otros
+  hallazgos para reportar en privado a upstream".
+- **#6-7** (`trading-config.spec.ts:145`): objeto con credenciales de
+  prueba cuyos propios nombres indican que son ficticias.
+- **#8-9** (mismo valor hex de 66 caracteres en `presets.spec.ts:43` y
+  `LeverupBroker.spec.ts:17`, mismo commit): entrada de preset de prueba
+  junto a hermanos trivialmente ficticios — muy probablemente una clave
+  privada dummy con forma de esquema válido, no confirmado con
+  certeza al 100%. Ver también
+  [[docs/trading-engine/UPSTREAM-agent-probe-auth-token.md]].
+- **#10** (`LeverupBroker.spec.ts:180`): valor evidentemente ficticio por
+  su propio contenido.
+- **#11** (`vercel-provider.spec.ts:61`): nombre de modelo pasado como
+  parámetro `key:`, no una credencial — falso positivo por heurística de
+  nombre de campo.
+
+**No se "arreglan"**: no son archivos nuestros, son historia upstream ya
+pública. Arreglarlos aquí no eliminaría el secreto del historial
+público de TraderAlice/OpenAlice ni de este fork, y reescribir historia
+compartida está fuera de alcance y prohibido por este mismo proyecto
+(`AGENTS.md` — nunca force-push, nunca reescribir `master`/`dev`).
+
+### 17.3 `.gitleaksignore`
+
+Creado en la raíz del repo con los 10 fingerprints únicos (formato
+`commit:archivo:regla:línea`, el campo `Fingerprint` real de gitleaks)
+que cubren los 11 hallazgos (#6 y #7 comparten fingerprint — dos
+coincidencias en la misma línea). Contiene solo fingerprints, nunca
+valores. Verificado real: re-correr el mismo comando del §17.1 con este
+archivo presente produce `no leaks found` sobre las mismas 3009
+commits/41.26 MB.
+
+### 17.4 Repetición antes de cada push
+
+Procedimiento completo (binario verificado, comando exacto, uso de
+`.gitleaksignore`) documentado en
+[[docs/trading-engine/SECRET-SCANNING.md]] para repetirlo antes de cada
+push futuro.
+
 ## Resumen de la línea de tiempo de esta sesión
 
 - Herramientas verificadas: git 2.49.0, Node v24.12.0, pnpm 11.7.0 (vía `corepack pnpm`).

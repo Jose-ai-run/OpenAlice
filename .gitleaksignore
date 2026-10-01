@@ -1,0 +1,10 @@
+bf86cec4e56041f1d7febb2c903038396edb7aff:patches/@xterm__addon-webgl@0.20.0-beta.286.patch:generic-api-key:6
+bf86cec4e56041f1d7febb2c903038396edb7aff:patches/@xterm__addon-webgl@0.20.0-beta.286.patch:generic-api-key:7
+569b7d8329ea614eef2f4ae10b033cc09fc543d9:patches/@xterm__xterm@6.1.0-beta.287.patch:generic-api-key:6
+569b7d8329ea614eef2f4ae10b033cc09fc543d9:patches/@xterm__xterm@6.1.0-beta.287.patch:generic-api-key:7
+93daccfa398fe2cc5e5bd4a609bf869d97aebe2e:packages/opentypebb/src/providers/eastmoney/models/equity-search.ts:generic-api-key:23
+8786a62ced077f6f60e41202139fc8dfdaf4fe6c:src/webui/routes/trading-config.spec.ts:generic-api-key:145
+2310a5a156f4ccf152513953cada89915f1da6e5:src/domain/trading/brokers/presets.spec.ts:generic-api-key:43
+2310a5a156f4ccf152513953cada89915f1da6e5:src/domain/trading/brokers/others/leverup/LeverupBroker.spec.ts:generic-api-key:17
+2310a5a156f4ccf152513953cada89915f1da6e5:src/domain/trading/brokers/others/leverup/LeverupBroker.spec.ts:generic-api-key:180
+696a6ae0a8b33bbfbfba6e77e92db2a587f4e984:src/ai-providers/vercel-ai-sdk/vercel-provider.spec.ts:generic-api-key:61

@@ -167,3 +167,58 @@ distinto de esta sesión de auditoría del motor de trading; y no se pidió
 explícitamente. Este documento (`docs/trading-engine/UPSTREAM-agent-probe-auth-token.md`)
 es el registro completo mientras tanto. No se abrió ningún issue, PR ni
 advisory público — nada se envió fuera de este checkout local.
+
+## Otros hallazgos para reportar en privado a upstream
+
+**Fecha:** 2026-09-30. Añadido durante la clasificación mecánica de los
+11 hallazgos de un escaneo `gitleaks` sobre todas las ramas locales (ver
+[[docs/trading-engine/AUDIT.md]] §17). Los 11 son upstream preexistentes
+(confirmado con `git merge-base --is-ancestor`), por lo que no se tocan
+aquí — igual que el hallazgo de `agent-probe` arriba, se documentan por
+forma y ubicación para que el usuario decida si y cómo reportarlos
+upstream, **sin reproducir ningún valor** en este ni en ningún otro
+documento del repo.
+
+### Token en `equity-search.ts` (eastmoney)
+
+- **Ubicación:** `packages/opentypebb/src/providers/eastmoney/models/equity-search.ts`,
+  constante llamada `TOKEN`, línea ~23 (commit de origen `93daccfa`, ver
+  tabla de §17.2 de `AUDIT.md`).
+- **Forma:** cadena hexadecimal de 32 caracteres, hardcodeada como
+  constante de módulo.
+- **Uso:** pasada como parámetro de autenticación a una llamada contra
+  `searchapi.eastmoney.com`, un endpoint de búsqueda de equities
+  aparentemente público.
+- **Incertidumbre:** no se determinó con certeza si es un token de
+  aplicación público/no sensible (común en APIs de datos de mercado que
+  exponen un token fijo para todos los clientes) o una credencial que
+  debería estar en configuración/entorno en vez de en el código fuente.
+  No se intentó usar el valor ni se hizo ninguna llamada de red para
+  probarlo.
+
+### `privateKey` en los specs de LeverUp
+
+- **Ubicación:** `src/domain/trading/brokers/presets.spec.ts` línea ~43
+  y `src/domain/trading/brokers/others/leverup/LeverupBroker.spec.ts`
+  línea ~17 (mismo valor en ambos archivos, mismo commit de origen
+  `2310a5a1`).
+- **Forma:** cadena hexadecimal de 66 caracteres con prefijo `0x` (forma
+  válida de clave privada de una cuenta EVM/estilo Ethereum), dentro de
+  un objeto de preset `'leverup-monad': { mode: 'testnet', privateKey: '<valor>' }`.
+- **Contexto que reduce el riesgo:** aparece junto a entradas hermanas
+  trivialmente ficticias en el mismo objeto de test (`apiKey: 'k'`,
+  `apiSecret: 's'`), y un tercer hallazgo relacionado en el mismo archivo
+  de LeverUp (`LeverupBroker.spec.ts:180`) usa literalmente
+  `'0xnotvalidkey'` — un patrón consistente de datos de prueba
+  inventados, no de una clave real filtrada por accidente.
+- **Incertidumbre:** con forma válida de clave privada (66 caracteres
+  hex con `0x`), no se puede descartar al 100% sin verificar si
+  corresponde a una cuenta con fondos reales en alguna red — verificación
+  que esta sesión no realizó intencionalmente (no se intentó derivar
+  una dirección ni consultar ningún explorador de bloques con el
+  valor).
+
+Ambos hallazgos quedan para que el usuario los reporte en privado a
+upstream (TraderAlice/OpenAlice) junto con el hallazgo de `agent-probe`
+documentado arriba, siguiendo el mismo canal que decida usar — ninguno
+de los dos se reportó ni se envió a ningún lado desde esta sesión.
