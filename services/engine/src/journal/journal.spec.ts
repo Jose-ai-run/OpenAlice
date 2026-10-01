@@ -72,4 +72,47 @@ describe('Journal', () => {
     expect(intentId).toBeGreaterThan(0)
     expect(() => journal.recordOrderEvent({ intentId, eventType: 'STAGED', now: new Date() })).not.toThrow()
   })
+
+  it('recentDecisions returns newest-first, round-tripping kind/reasonCodes/decision', () => {
+    const journal = makeJournal()
+    const cycleId = journal.startCycle({
+      mode: 'SIGNAL_ONLY', interval: '1h',
+      candleCloseAt: new Date('2026-09-27T15:00:00.000Z'), startedAt: new Date(),
+    })
+    journal.recordDecision({
+      cycleId, symbol: 'BTC', aliceId: 'bybit-readonly|BTC/USDT:USDT',
+      strategyId: 'trend-following', strategyVersion: '0.1.0',
+      decision: { kind: 'NONE', reasonCodes: ['no_signal'] }, createdAt: new Date('2026-09-27T15:00:01.000Z'),
+    })
+    journal.recordDecision({
+      cycleId, symbol: 'ETH', aliceId: 'bybit-readonly|ETH/USDT:USDT',
+      strategyId: 'trend-following', strategyVersion: '0.1.0',
+      decision: { kind: 'ENTER', side: 'long', entry: 100, stop: 95, score: 0.5, reasonCodes: ['x'] },
+      createdAt: new Date('2026-09-27T15:00:02.000Z'),
+    })
+
+    const recent = journal.recentDecisions(10)
+    expect(recent).toHaveLength(2)
+    expect(recent[0]?.symbol).toBe('ETH')  // newest first
+    expect(recent[0]?.kind).toBe('ENTER')
+    expect(recent[0]?.decision).toEqual({ kind: 'ENTER', side: 'long', entry: 100, stop: 95, score: 0.5, reasonCodes: ['x'] })
+    expect(recent[1]?.symbol).toBe('BTC')
+    expect(recent[1]?.reasonCodes).toEqual(['no_signal'])
+  })
+
+  it('recentDecisions respects the limit', () => {
+    const journal = makeJournal()
+    const cycleId = journal.startCycle({
+      mode: 'SIGNAL_ONLY', interval: '1h',
+      candleCloseAt: new Date('2026-09-27T15:00:00.000Z'), startedAt: new Date(),
+    })
+    for (let i = 0; i < 5; i++) {
+      journal.recordDecision({
+        cycleId, symbol: `S${i}`, aliceId: `bybit-readonly|S${i}`,
+        strategyId: 'trend-following', strategyVersion: '0.1.0',
+        decision: { kind: 'NONE' }, createdAt: new Date(),
+      })
+    }
+    expect(journal.recentDecisions(2)).toHaveLength(2)
+  })
 })

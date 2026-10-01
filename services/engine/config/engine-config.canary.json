@@ -1,0 +1,22 @@
+{
+  "mode": "PAPER",
+  "interval": "1h",
+  "historyBars": 120,
+  "strategy": {
+    "id": "trend-following",
+    "params": {
+      "fastPeriod": 10,
+      "slowPeriod": 30,
+      "atrPeriod": 14,
+      "atrStopMultiplier": 2
+    }
+  },
+  "universe": [
+    {
+      "label": "BTC/USDT perp (Bybit)",
+      "utaId": "bybit-readonly",
+      "aliceId": "bybit-readonly|BTC/USDT:USDT"
+    }
+  ],
+  "paperAccountId": "engine-paper"
+}

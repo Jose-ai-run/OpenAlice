@@ -35,6 +35,7 @@ import { startOrderSyncPoller } from './domain/trading/order-sync-poller.js'
 import { buildKeylessDataUTAs } from './domain/trading/keyless-data-sources.js'
 import { createTradingRoutes } from './http/routes-trading.js'
 import { createSimulatorRoutes } from './http/routes-simulator.js'
+import { createRiskRoutes } from './http/routes-risk.js'
 import { utaAuthMiddleware } from './http/auth.js'
 import { engineAccountGuard } from './http/engine-account-guard.js'
 import { checkRiskEngineDeploymentSafety } from './domain/trading/risk/deployment-safety.js'
@@ -224,6 +225,7 @@ export async function startUTAService(): Promise<void> {
   // mode (no OPENALICE_UTA_TOKENS_FILE); see http/auth.ts.
   app.use('/api/trading/*', utaAuthMiddleware(utaTokensPath))
   app.use('/api/simulator/*', utaAuthMiddleware(utaTokensPath))
+  app.use('/api/risk/*', utaAuthMiddleware(utaTokensPath))
   // [PROPUESTA] Fase 4d (S1) — after auth, so it can read c.get('utaAuth').
   // Only gates stage/commit on accounts the RO policy marks engineOwned.
   app.use('/api/trading/*', engineAccountGuard())
@@ -234,6 +236,11 @@ export async function startUTAService(): Promise<void> {
   // because both need direct access to UTA's in-process MockBroker
   // instances. Alice BFF proxies `/api/simulator/*` to here.
   app.route('/api/simulator', createSimulatorRoutes(tradingCtx))
+  // [PROPUESTA] Hito 1 Parte 2 (AUDIT.md §18) — minimal kill-switch
+  // GET/POST slice of the routes-risk.ts PROMPT_MASTER_CLAUDE_CODE.md §7
+  // already specified. Falls back to 'operator' scope via auth.ts's
+  // unmatched-route default — no new SCOPE_RULES entry needed.
+  app.route('/api/risk', createRiskRoutes(tradingCtx))
 
   // ==================== Bind + shutdown ====================
 

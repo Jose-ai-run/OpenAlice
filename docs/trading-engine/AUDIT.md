@@ -1634,6 +1634,199 @@ Procedimiento completo (binario verificado, comando exacto, uso de
 [[docs/trading-engine/SECRET-SCANNING.md]] para repetirlo antes de cada
 push futuro.
 
+## 18. Hito 1 Parte 2 — mapeo de instrumentos, canary PAPER, status page — 2026-10-01
+
+Alcance: items 3a (mapeo), 3b (canary PAPER real con entrada+stop→salida,
+kill switch, reinicio sin duplicados) y 3d (página de estado +
+`DEMO-LOCAL.md`). Item 3c (24h) **no iniciado** — pendiente de
+aprobación explícita, per instrucción del usuario.
+
+### 18.1 Componentes nuevos
+
+- [[../../services/engine/src/loop/run-cycle.ts]]: `RunCycleOptions.getPosition` opcional
+  — omitido preserva el comportamiento SIGNAL_ONLY exacto (test añadido).
+- `services/engine/src/data/price-feeder.ts` — cliente delgado sobre
+  `POST /api/simulator/uta/:id/mark-price` (ya existente); `nativeKeyOf`/
+  `paperAliceId` reutilizan el mismo nativeKey verificado contra
+  `bybit-readonly`, sin inventar una búsqueda de contrato aparte —
+  verificado por inspección de `UnifiedTradingAccount.contractFromAliceId`
+  y `MockBroker.resolveNativeKey`/`getNativeKey`.
+- `services/uta/src/http/routes-risk.ts` — slice mínimo de
+  PROMPT_MASTER §7 (GET/POST/reset kill-switch únicamente). Sin entrada
+  nueva en `auth.ts`'s `SCOPE_RULES`: cae al fallback `operator` que la
+  tabla ya documenta para cualquier ruta no listada.
+- `services/engine/src/http/routes-status.ts` + `main.ts` ahora carga
+  config+DB+UTA real (antes: "Fase 1 skeleton", cero lógica) —
+  `GET /engine/status` (JSON) y `GET /` (HTML) en `127.0.0.1:47340`.
+- `services/engine/src/cli/paper-canary.ts` — driver de demo, **no** el
+  ExecutionManager de la Fase 7 (`services/engine/src/execution/` sigue
+  siendo un `.gitkeep`). Reutiliza `runCycle`/`MarketDataStore`/`Journal`
+  igual que `signal-only-replay.ts`; llama directamente a las rutas HTTP
+  de UTA ya existentes (stage/commit/push/sync) — ninguna ruta nueva de
+  trading.
+- `Journal.recentDecisions()` — lectura nueva, solo para la página de
+  estado.
+
+### 18.2 Verificación real contra la cuenta mock (item 3a)
+
+`GET /api/trading/uta` contra UTA en vivo confirmó, de verdad, ambas
+cuentas:
+
+```
+bybit-readonly  — datos, sin clave, conectado
+engine-paper    — MockBroker, no efímero, soporta MKT/LMT/STP/STP LMT
+```
+
+Mapeo verificado: `bybit-readonly|BTC/USDT:USDT` (dato) →
+`engine-paper|BTC/USDT:USDT` (ejecución) — mismo nativeKey, confirmado
+por el propio `stage-place-order` real (si el mapeo fuera inválido,
+`contractFromAliceId` lo habría rechazado; no lo hizo). Un símbolo sin
+mapeo válido queda excluido antes de intentar nada (ver el bloque "3a"
+de `paper-canary.ts`: captura el error de `nativeKeyOf` y lo loguea sin
+tradearlo) — no verificado con un caso real porque el único símbolo
+configurado (BTC) sí tiene mapeo válido; el camino de error existe y es
+real código, no solo un comentario.
+
+### 18.3 Canary PAPER real — entrada con stop protector → salida (item 3b)
+
+Ventana real localizada por el propio código de estrategia
+(`trendFollowingStrategy.evaluate`, cero señales fabricadas) sobre 1500
+velas 1h reales de Bybit:
+
+```
+ENTER real @ 2026-08-02T05:00:00.000Z: long entry=63558.4 stop=63130.14254622707
+  reasons=fast_sma_crossed_above_slow
+salida real @ 2026-08-02T10:00:00.000Z: STOP_OUT price=63130.14254622707
+```
+
+**Dos hallazgos reales, no anticipados, encontrados ejecutando esto de
+verdad (no asumidos):**
+
+1. **R14 ("stop obligatorio") no tiene conciencia entre operaciones del
+   mismo commit.** Primer intento: entrada MKT (sin `stopLoss` propio) +
+   orden `STP` separada en el MISMO commit → R14 rechazó la entrada con
+   `"[risk:R14] no protective stop attached and order is not itself a
+   stop type"` porque evalúa cada operación de forma aislada, sin saber
+   que la operación hermana en el mismo commit es su protección.
+   **Corrección aplicada:** la entrada ahora lleva su propio
+   `stopLoss: {price}` (satisface R14), y la orden `STP` real que de
+   verdad protege la posición en MockBroker se sigue mandando aparte —
+   ver hallazgo 3 abajo sobre por qué no basta con el `tpsl`.
+2. **R13 (cooldown) no distingue una orden protectora de una nueva
+   entrada en el mismo símbolo.** Con la entrada y el stop en el mismo
+   commit, tras ejecutarse la entrada (operación 0), la operación 1 (el
+   stop) fue rechazada por `"[risk:R13] cooldown active for
+   \"BTC/USDT:USDT\" until ..."` — el cooldown que la propia entrada
+   acababa de armar bloqueó su propio stop protector. **Corrección
+   aplicada:** el stop se stagea/commitea/pushea en un commit SEPARADO,
+   tras esperar los 60s reales de `cooldownSecondsPerSymbol` de la
+   política (`deploy/examples/risk-policy.example.json`) — no se rodea
+   la regla, se espera a que expire, igual que cualquier otro llamador.
+3. **`MockBroker.placeOrder` ignora `tpsl` por completo** (confirmado
+   por inspección de código: el parámetro solo se graba en el
+   `_record()` del log de llamadas, nunca se usa) — por lo que un
+   `stopLoss` adjunto a la entrada SOLO sirve para satisfacer a R14, no
+   crea ninguna protección real en el broker simulado. La protección
+   real es la orden `STP` separada (`auxPrice=stop`, acción opuesta a
+   la entrada), que MockBroker sí dispara genuinamente vía
+   `_matchPendingOrders` cuando el precio real la cruza. Ambos
+   hallazgos (1–3) quedan documentados aquí como gaps reales del
+   RiskEngine/MockBroker, no corregidos en este alcance (no son parte
+   del pedido de Hito 1 Parte 2; corregirlos es trabajo de una fase de
+   riesgo/ejecución posterior, con su propio ADR si se decide).
+
+Resultado real, tras la corrección de secuenciación:
+
+```
+[canary] ENTRADA pusheada: submitted=[{orderId:"mock-ord-4", status:"filled"}]
+[canary] (65s de espera real por R13) STOP PROTECTOR pusheado:
+  submitted=[{orderId:"mock-ord-5", status:"submitted"}]
+[canary] markPrice = 63130.14254622707 (stop real alcanzado con datos de mercado reales)
+[canary] sync tras el stop: {"updatedCount":1,"updates":[{"orderId":"mock-ord-5",
+  "previousStatus":"submitted","currentStatus":"filled","filledQty":"0.078",
+  "filledPrice":"63130.14254622707"}]}
+```
+
+Commits reales en Trading-as-Git (`GET /api/trading/uta/engine-paper/wallet/log`):
+
+```
+902e5028  ENTER long @ 63558.4 stop=63130.14254622707
+03b1eb90  stop protector armado @ 63130.14254622707
+d8b27dee  [sync] BTC/USDT:USDT filled   <- la SALIDA real, por el stop
+```
+
+Visible en la UI de OpenAlice en `/trading-as-git` (filtrando por cuenta
+`engine-paper`) una vez la UI esté corriendo — no verificado en esta
+sesión por captura de pantalla, pero la API que esa página consume
+(`GET /api/trading/uta/:id/wallet/log`, vía el proxy de Alice) es la
+misma que se acaba de verificar arriba.
+
+Cuenta plana al final: `positions:[]`, `pendingOrders:[]`,
+`cash:"99933.19..."` (pérdida real de la simulación: entrada
+63558.4 → stop 63130.14, 0.078 BTC).
+
+### 18.4 Reinicio a mitad de ciclo — cero duplicados
+
+Tras `commit` (pendingHash real) y antes de `push`, se reintentó
+`stage-place-order` con el mismo cuerpo exacto (simulando que el Engine
+se reinició y olvidó que ya había commiteado):
+
+```
+HTTP 400 {"error":"A commit is awaiting approval. Push or reject it
+  before staging more operations."}
+```
+
+El `pendingHash` tras el reintento siguió siendo idéntico al original —
+cero órdenes duplicadas, usando exclusivamente la regla ya existente de
+`TradingGit.add()` (un solo commit pendiente por cuenta), no un
+mecanismo inventado para esta prueba.
+
+### 18.5 Kill switch — real, vía `routes-risk.ts`
+
+```
+POST /api/risk/uta/engine-paper/kill-switch {status:"HALT_NEW", reason:"canary..."}
+  → HTTP 200 {"status":"HALT_NEW"}
+POST stage-place-order + commit + push (misma entrada de prueba)
+  → push: {"rejected":[{"error":"[risk:R0] kill switch is HALT_NEW"}]}
+POST /api/risk/uta/engine-paper/kill-switch/reset {reason:"...", force:true}
+  → HTTP 200 {"status":"NORMAL"}
+```
+
+R0 (primero en `RULE_CHAIN`, antes que R13) rechazó la orden de prueba
+de verdad; el reset dejó la cuenta en `NORMAL` para no interferir con
+nada posterior.
+
+### 18.6 Página de estado — real, en `127.0.0.1:47340`
+
+```
+GET /engine/status → {mode:"PAPER", paperAccountId:"engine-paper",
+  instrumentMapping:[...], dataStalenessSeconds:229,
+  killSwitch:{status:"NORMAL"}, walletStatus:{commitCount:9,...},
+  recentDecisions:[{kind:"ENTER", origin:"canary (sin scheduler en
+    vivo wireado todavía — ver services/engine/src/main.ts)"}]}
+GET /            → HTML con la misma información, tabla legible
+```
+
+`origin` dice explícitamente que no hay scheduler en vivo wireado
+todavía (confirmado: `main.ts` solo arranca el servidor HTTP; no hay
+bucle periódico) — no se fabricó una columna de procedencia que
+implicara una capacidad de "vivo vs. canary" que todavía no existe.
+
+### 18.7 Salida real de tests y typecheck
+
+```
+cd services/engine && pnpm run test        # 26/26 archivos, 121/121 tests
+cd services/engine && pnpm run typecheck   # limpio
+node scripts/run-tests.mjs --path services/uta/src/http/routes-risk.spec.ts
+                                            # 1/1 archivo, 6/6 tests
+cd services/uta && pnpm run typecheck      # limpio
+```
+
+### 18.8 Pendiente
+
+Item 3c (24h en PAPER, sin intervención) — **no iniciado**, a la espera
+de aprobación explícita tras ver esta evidencia, según lo pedido.
+
 ## Resumen de la línea de tiempo de esta sesión
 
 - Herramientas verificadas: git 2.49.0, Node v24.12.0, pnpm 11.7.0 (vía `corepack pnpm`).

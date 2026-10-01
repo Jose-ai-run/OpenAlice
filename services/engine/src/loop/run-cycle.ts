@@ -29,6 +29,15 @@ export interface RunCycleOptions {
    *  no-lookahead check downstream. */
   closeAt: Date
   clock?: Clock
+  /**
+   * [PROPUESTA] Hito 1 Parte 2 — optional position lookup, so a caller that
+   * tracks open positions (the paper canary driver; later PositionMonitor,
+   * Fase 7) can let a strategy see its own open position and emit EXIT.
+   * Omitted (the default) preserves exact pre-existing SIGNAL_ONLY
+   * behavior: every context's `position` stays `undefined`, byte-identical
+   * to before this option existed.
+   */
+  getPosition?: (aliceId: string) => { side: 'long' | 'short'; entry: number; stop: number } | undefined
 }
 
 export interface CycleDecision {
@@ -61,6 +70,7 @@ async function decideOne(
     interval,
     asOf: opts.closeAt,
     params: opts.config.strategy.params ?? {},
+    position: opts.getPosition?.(entry.aliceId),
   })
   return { decision: opts.strategy.evaluate(ctx), barsUsed: ctx.bars.length }
 }

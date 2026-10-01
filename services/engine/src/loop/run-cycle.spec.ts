@@ -120,4 +120,30 @@ describe('runCycle', () => {
 
     expect(seenCloses).toEqual(['100', '101'])
   })
+
+  it('threads getPosition into the strategy context (Hito 1 Parte 2) — omitted keeps position undefined', async () => {
+    const client = { getHistoricalBars: vi.fn(async () => [bar('2026-09-27T14:00:00.000Z', '100')]) } as unknown as EngineUtaClient
+    const store = new MarketDataStore({ client })
+    const journal = makeJournal()
+    let seenPosition: unknown
+    const spyStrategy: Strategy = {
+      id: 'fake', version: '1.0.0', paramsSchema: {} as never,
+      warmup: () => [],
+      evaluate: (ctx): StrategyDecision => { seenPosition = ctx.position; return { kind: 'NONE' } },
+    }
+
+    await runCycle({
+      config: makeConfig(), marketDataStore: store, strategy: spyStrategy, journal,
+      closeAt: new Date('2026-09-27T15:00:00.000Z'),
+    })
+    expect(seenPosition).toBeUndefined()
+
+    const openPosition = { side: 'long' as const, entry: 100, stop: 95 }
+    await runCycle({
+      config: makeConfig(), marketDataStore: store, strategy: spyStrategy, journal,
+      closeAt: new Date('2026-09-27T15:00:00.000Z'),
+      getPosition: () => openPosition,
+    })
+    expect(seenPosition).toEqual(openPosition)
+  })
 })

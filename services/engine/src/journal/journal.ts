@@ -102,4 +102,30 @@ export class Journal {
   private lastInsertId(): number {
     return (this.db.prepare('SELECT last_insert_rowid() as id').get() as { id: number }).id
   }
+
+  /**
+   * [PROPUESTA] Hito 1 Parte 2, item 3d — the read side the status page
+   * needs: the most recent journaled decisions, newest first. Read-only;
+   * does not touch `cycles`/`order_intents` shape or meaning.
+   */
+  recentDecisions(limit = 20): Array<{
+    decisionId: number; cycleId: number; symbol: string; aliceId: string
+    strategyId: string; strategyVersion: string; kind: string
+    reasonCodes: string[] | null; decision: StrategyDecision; createdAt: string
+  }> {
+    const rows = this.db.prepare(`
+      SELECT decision_id, cycle_id, symbol, alice_id, strategy_id, strategy_version, kind, reason_codes, decision_json, created_at
+      FROM decisions ORDER BY decision_id DESC LIMIT ?
+    `).all(limit) as Array<{
+      decision_id: number; cycle_id: number; symbol: string; alice_id: string
+      strategy_id: string; strategy_version: string; kind: string
+      reason_codes: string | null; decision_json: string; created_at: string
+    }>
+    return rows.map((r) => ({
+      decisionId: r.decision_id, cycleId: r.cycle_id, symbol: r.symbol, aliceId: r.alice_id,
+      strategyId: r.strategy_id, strategyVersion: r.strategy_version, kind: r.kind,
+      reasonCodes: r.reason_codes ? JSON.parse(r.reason_codes) as string[] : null,
+      decision: JSON.parse(r.decision_json) as StrategyDecision, createdAt: r.created_at,
+    }))
+  }
 }
